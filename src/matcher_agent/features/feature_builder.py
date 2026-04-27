@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from matcher_agent.features.genre_tagger import (
+    has_conflict,
+    jaccard,
+    tag_text,
+)
+from matcher_agent.features.playlist_profiles import (
+    AUDIO_FEATURE_COLS,
+    ProfileBundle,
+    _safe_normalize,
+)
+
+# These feature names are the contract between training, persistence, and
+# inference. Adding/removing a name requires retraining.
+#
+# NOTE: Playlist-prior features (acceptance_rate, accepted_count,
+# declined_count) are intentionally EXCLUDED from the model. In our data
+# they're popularity confounders that, if included, dominate the model and
+# cause it to recommend the same handful of high-acceptance playlists for
+# every track regardless of genre. They are still computed and exposed for
+# downstream re-ranking, just not fed to the GBM.
+PAIRWISE_FEATURE_COLS: list[str] = [
+    "semantic_similarity",
+    "title_text_similarity",
+    "audio_centroid_cosine",
+    "audio_centroid_l2",
+    "audio_zscore_mean",
+    "audio_zscore_max",
+    "genre_jaccard",
+    "genre_overlap_count",
+    "genre_conflict_flag",
+    "genre_tag_count_track",
+    "genre_tag_count_playlist",
+    "track_audio_available",
+]
+
+
+def _norm(text: str | None) -> str:
+    return (text or "").strip().lower()
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    if a is None or b is None:
+        return 0.0
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    na = np.linalg.norm(a)
+    nb = np.linalg.norm(b)
+    if na <= 1e-12 or nb <= 1e-12:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+def _audio_zscore_diff(
+    track_audio: np.ndarray, centroid: np.ndarray, std: np.ndarray
+) -> tuple[float, float]:
+    if track_audio is None or centroid is None or std is None:
+        return 0.0, 0.0
+    diff = np.abs(track_audio - centroid) / (std + 1e-3)
+    diff = diff[~np.isnan(diff)]
+    if diff.size == 0:
+        return 0.0, 0.0
+    return float(np.mean(diff)), float(np.max(diff))
+
+
+def _audio_l2(track_audio: np.ndarray, centroid: np.ndarray) -> float:
+    if track_audio is None or centroid is None:
+        return 0.0
+    diff = track_audio - centroid
+    diff = diff[~np.isnan(diff)]
+    if diff.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(diff * diff)))
+
+
+def build_track_audio_lookup(
+    tracks_df: pd.DataFrame, audio_feature_cols: list[str]
+) -> dict[str, np.ndarray]:
+    if not audio_feature_cols:
+        return {}
+    cols = ["track_id", *[c for c in audio_feature_cols if c in tracks_df.columns]]
+    if len(cols) == 1:
+        return {}
+    sub = tracks_df[cols].copy()
+    sub["track_id"] = sub["track_id"].astype("string")
+    out: dict[str, np.ndarray] = {}
+    audio_cols = cols[1:]
+    for _, row in sub.iterrows():
+        tid = row["track_id"]
+        if pd.isna(tid):
+            continue
+        vec = np.array(
+            [pd.to_numeric(row[c], errors="coerce") for c in audio_cols],
+            dtype=np.float64,
+        )
+        if not np.all(np.isnan(vec)):
+            out[str(tid)] = vec
+    return out
+
+
+def build_pair_features(
+    pairs_df: pd.DataFrame,
+    *,
+    profile_bundle: ProfileBundle,
+    track_text_emb_by_id: dict[str, np.ndarray],
+    track_audio_by_id: dict[str, np.ndarray],
+    track_meta_by_id: dict[str, dict],
+) -> pd.DataFrame:
+    """Compute pairwise features for every (track_id, playlist_id) row.
+
+    `pairs_df` must include track_id, playlist_id columns. Other columns
+    (label, etc.) are passed through.
+    """
+    print(f"[Features] Computing pairwise features for {len(pairs_df)} rows.")
+
+    rows = pairs_df.copy()
+    rows["track_id"] = rows["track_id"].astype("string")
+    rows["playlist_id"] = rows["playlist_id"].astype("string")
+
+    profiles = profile_bundle.profiles
+    audio_cols = profile_bundle.audio_feature_cols
+    audio_dim = len(audio_cols)
+    zero_audio = np.full(audio_dim, np.nan, dtype=np.float64) if audio_dim else None
+
+    out_records: list[dict] = []
+    for record in rows.to_dict(orient="records"):
+        tid = str(record["track_id"])
+        pid = str(record["playlist_id"])
+        prof = profiles.get(pid)
+        meta = track_meta_by_id.get(tid, {})
+        track_emb = track_text_emb_by_id.get(tid)
+        track_audio = track_audio_by_id.get(tid)
+        track_text = (
+            f"{meta.get('artist','')} {meta.get('track_name','')} {meta.get('album','')}"
+        ).strip()
+        track_tags = meta.get("_cached_tags") or tag_text(track_text)
+        meta["_cached_tags"] = track_tags
+
+        if prof is not None and track_emb is not None:
+            semantic_similarity = _cosine(track_emb, prof.semantic_centroid)
+            title_text_similarity = _cosine(track_emb, prof.text_emb)
+        else:
+            semantic_similarity = 0.0
+            title_text_similarity = 0.0
+
+        if prof is not None and prof.audio_centroid is not None and track_audio is not None:
+            audio_norm_track = _safe_normalize(track_audio.astype(np.float64))
+            audio_norm_centroid = _safe_normalize(prof.audio_centroid.astype(np.float64))
+            audio_centroid_cosine = _cosine(audio_norm_track, audio_norm_centroid)
+            audio_centroid_l2 = _audio_l2(track_audio, prof.audio_centroid)
+            audio_z_mean, audio_z_max = _audio_zscore_diff(
+                track_audio, prof.audio_centroid, prof.audio_std
+            )
+            track_audio_available = 1.0
+        else:
+            audio_centroid_cosine = 0.0
+            audio_centroid_l2 = 0.0
+            audio_z_mean = 0.0
+            audio_z_max = 0.0
+            track_audio_available = 1.0 if track_audio is not None else 0.0
+
+        if prof is not None:
+            tags_overlap = jaccard(track_tags, prof.tags)
+            overlap_count = float(len(track_tags & prof.tags))
+            conflict = 1.0 if has_conflict(track_tags, prof.tags) else 0.0
+            tag_count_pl = float(len(prof.tags))
+            acceptance_rate = float(prof.acceptance_rate)
+            accepted_count = float(prof.accepted_count)
+            declined_count = float(prof.declined_count)
+        else:
+            tags_overlap = 0.0
+            overlap_count = 0.0
+            conflict = 0.0
+            tag_count_pl = 0.0
+            acceptance_rate = 0.0
+            accepted_count = 0.0
+            declined_count = 0.0
+
+        out_records.append(
+            {
+                **record,
+                "semantic_similarity": semantic_similarity,
+                "title_text_similarity": title_text_similarity,
+                "audio_centroid_cosine": audio_centroid_cosine,
+                "audio_centroid_l2": audio_centroid_l2,
+                "audio_zscore_mean": audio_z_mean,
+                "audio_zscore_max": audio_z_max,
+                "genre_jaccard": tags_overlap,
+                "genre_overlap_count": overlap_count,
+                "genre_conflict_flag": conflict,
+                "genre_tag_count_track": float(len(track_tags)),
+                "genre_tag_count_playlist": tag_count_pl,
+                "playlist_acceptance_rate": acceptance_rate,
+                "playlist_accepted_track_count": accepted_count,
+                "playlist_declined_track_count": declined_count,
+                "track_audio_available": track_audio_available,
+            }
+        )
+
+    df = pd.DataFrame(out_records)
+    df = df.replace([np.inf, -np.inf], np.nan)
+    return df
+
+
+def select_model_features(
+    df: pd.DataFrame, *, excluded: set[str] | None = None
+) -> list[str]:
+    """Return the explicit, fixed pairwise feature column list, in fixed order.
+
+    We deliberately do NOT auto-discover columns: the previous implementation
+    pulled in identifier-like fields and prior-only signals that caused
+    leakage and prevented learning track↔playlist fit. Anything that needs to
+    be a feature must be added to PAIRWISE_FEATURE_COLS explicitly.
+    """
+    excluded = excluded or set()
+    return [c for c in PAIRWISE_FEATURE_COLS if c in df.columns and c not in excluded]
+
+
+def build_track_meta_lookup(tracks_df: pd.DataFrame) -> dict[str, dict]:
+    """Per-track metadata bag used by the pairwise feature builder."""
+    meta_cols = [c for c in ("track_name", "artist", "album") if c in tracks_df.columns]
+    sub = tracks_df[["track_id", *meta_cols]].copy()
+    sub["track_id"] = sub["track_id"].astype("string")
+    out: dict[str, dict] = {}
+    for _, row in sub.iterrows():
+        tid = row["track_id"]
+        if pd.isna(tid):
+            continue
+        out[str(tid)] = {c: ("" if pd.isna(row[c]) else str(row[c])) for c in meta_cols}
+    return out

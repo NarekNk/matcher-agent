@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+music-env/
+.venv/
+venv/
+
+# Local caches
+.cache/
+.cache
+
+# Generated artifacts and outputs
+artifacts/
+output/
+audio_previews/
+audio_previews_bench_*/
+
+# Data (usually large/private; keep only if intentionally versioning)
+data/*.parquet
+data/embeddings/
+data/sync_state.json
+
+# Jupyter
+.ipynb_checkpoints/
