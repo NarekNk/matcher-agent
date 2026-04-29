@@ -135,6 +135,7 @@ def train_ranker(
         track_text_emb_by_id=train_bundle.track_text_emb_by_id,
         track_audio_by_id=train_bundle.track_audio_by_id,
         track_meta_by_id=train_bundle.track_meta_by_id,
+        track_popularity_by_id=train_bundle.track_popularity_by_id,
     )
     print(f"[Train] Test pair rows={len(test_df)} positives={int(test_df['label'].sum())}")
 
@@ -299,6 +300,7 @@ def _augment_with_random_negatives(
         track_text_emb_by_id=train_bundle.track_text_emb_by_id,
         track_audio_by_id=train_bundle.track_audio_by_id,
         track_meta_by_id=train_bundle.track_meta_by_id,
+        track_popularity_by_id=train_bundle.track_popularity_by_id,
     )
     return pd.concat([train_df, sampled_feats], ignore_index=True)
 
@@ -399,6 +401,7 @@ def _full_catalog_eval(
         track_text_emb_by_id=train_bundle.track_text_emb_by_id,
         track_audio_by_id=train_bundle.track_audio_by_id,
         track_meta_by_id=train_bundle.track_meta_by_id,
+        track_popularity_by_id=train_bundle.track_popularity_by_id,
     )
     probs = pipeline.predict_proba(feats[feature_cols])[:, 1]
     feats["pred_proba"] = probs

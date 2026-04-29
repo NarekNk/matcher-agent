@@ -14,6 +14,9 @@ class TrackInput:
     preview_url: str | None = None
     spotify_url: str | None = None
     artist_genres: list[str] = field(default_factory=list)
+    # Spotify popularity 0-100. None means "unknown" — popularity-fit
+    # features will fall back to neutral values for this track.
+    popularity: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

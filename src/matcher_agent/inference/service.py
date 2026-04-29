@@ -12,11 +12,13 @@ from matcher_agent.features.feature_builder import (
     build_track_audio_lookup,
     build_track_meta_lookup,
 )
+from matcher_agent.features.genre_normalizer import normalize_external_labels
 from matcher_agent.features.genre_tagger import has_conflict, tag_text
 from matcher_agent.features.playlist_profiles import (
     AUDIO_FEATURE_COLS,
     build_playlist_text_strings,
     build_profiles,
+    build_track_popularity_lookup,
     build_track_text_strings,
 )
 from matcher_agent.models import PlaylistRecommendation, TrackInput
@@ -97,6 +99,7 @@ class MatcherService:
             tracks_df, self.profile_bundle.audio_feature_cols
         )
         self.track_meta_by_id = build_track_meta_lookup(tracks_df)
+        self.track_popularity_by_id = build_track_popularity_lookup(tracks_df)
         self.playlists_df = playlists_df
         self.historical_df = historical_df
 
@@ -121,13 +124,14 @@ class MatcherService:
         track_id = track.track_id or "__adhoc_track__"
         text = self._track_text_for_input(track)
         track_tags = tag_text(text)
-        # Spotify-provided artist genres are authoritative; merge them in so
-        # we can do hard genre filtering even when the title alone is uninformative.
+        # Spotify-provided artist genres are authoritative; map them through
+        # the explicit normalizer (which handles compound labels like
+        # "west coast hip hop", "neo soul", "drum and bass") and merge in.
         if track.artist_genres:
-            for g in track.artist_genres:
-                track_tags |= tag_text(g)
+            track_tags |= normalize_external_labels(track.artist_genres)
         print(
             f"[Recommend] Scoring track='{track.track_name}' artist='{track.artist}' "
+            f"popularity={track.popularity} "
             f"tags={sorted(track_tags) if track_tags else '[]'} n={n}"
         )
 
@@ -152,6 +156,12 @@ class MatcherService:
         if track_audio_vec is not None:
             audio_lookup[track_id] = track_audio_vec
 
+        # Override the popularity lookup with the inference-time value so
+        # the popularity-fit features see the freshly fetched score.
+        popularity_lookup = dict(self.track_popularity_by_id)
+        if track.popularity is not None:
+            popularity_lookup[track_id] = float(track.popularity)
+
         playlist_ids = list(self.profile_bundle.profiles.keys())
         pair_input = pd.DataFrame(
             {"track_id": [track_id] * len(playlist_ids), "playlist_id": playlist_ids}
@@ -163,6 +173,7 @@ class MatcherService:
             track_text_emb_by_id=track_text_lookup,
             track_audio_by_id=audio_lookup,
             track_meta_by_id=meta_lookup,
+            track_popularity_by_id=popularity_lookup,
         )
 
         X = feats[self.feature_columns].copy()

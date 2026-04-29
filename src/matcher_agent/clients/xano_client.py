@@ -31,6 +31,28 @@ class XanoClient:
         text = str(value).strip()
         return text if text else None
 
+    @staticmethod
+    def _as_str_list(value: Any) -> list[str]:
+        """Normalize a string-array column (e.g. Xano `genres`/`subgenres`).
+
+        Returns a deduplicated list of stripped strings, preserving order.
+        Anything that isn't a list, or whose elements can't be stringified
+        into a non-empty value, is dropped.
+        """
+        if not isinstance(value, list):
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+        return out
+
     def _fetch_endpoint(
         self,
         base_url: str,
@@ -95,6 +117,11 @@ class XanoClient:
                     "playlist_name": self._as_str_or_none(row.get("playlistName")),
                     "description": self._as_str_or_none(row.get("description")),
                     "playlist_url": self._as_str_or_none(row.get("playlistUrl")),
+                    # Curator-tagged genre arrays. Stored as list[str]; downstream
+                    # uses `genre_normalizer.normalize_xano_labels()` to map to
+                    # canonical tags.
+                    "genres": self._as_str_list(row.get("genres")),
+                    "subgenres": self._as_str_list(row.get("subgenres")),
                 }
             )
         print(f"[Xano:playlists] normalized_rows={len(normalized)}")

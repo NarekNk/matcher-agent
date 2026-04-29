@@ -16,6 +16,7 @@ from matcher_agent.features.playlist_profiles import (
     ProfileBundle,
     build_playlist_text_strings,
     build_profiles,
+    build_track_popularity_lookup,
     build_track_text_strings,
 )
 
@@ -28,6 +29,7 @@ class TrainingDataBundle:
     playlist_text_emb_by_id: dict[str, np.ndarray]
     track_audio_by_id: dict[str, np.ndarray]
     track_meta_by_id: dict[str, dict]
+    track_popularity_by_id: dict[str, float]
 
 
 def _embed_lookup(
@@ -64,7 +66,7 @@ def build_training_bundle(
     matches_df = matches_df.dropna(subset=["track_id", "playlist_id", "label"])
 
     track_meta_columns = [
-        c for c in ("track_id", "track_name", "artist", "album", *AUDIO_FEATURE_COLS)
+        c for c in ("track_id", "track_name", "artist", "album", "popularity", *AUDIO_FEATURE_COLS)
         if c in tracks_df.columns
     ]
     tracks_df = tracks_df[track_meta_columns].copy()
@@ -118,6 +120,11 @@ def build_training_bundle(
 
     track_audio_by_id = build_track_audio_lookup(tracks_df, profile_bundle.audio_feature_cols)
     track_meta_by_id = build_track_meta_lookup(tracks_df)
+    track_popularity_by_id = build_track_popularity_lookup(tracks_df)
+    print(
+        f"[Dataset] Track popularity coverage: "
+        f"{len(track_popularity_by_id)}/{len(tracks_df)} tracks"
+    )
 
     pair_features = build_pair_features(
         matches_df[["track_id", "playlist_id", "label"]],
@@ -125,6 +132,7 @@ def build_training_bundle(
         track_text_emb_by_id=track_text_emb_by_id,
         track_audio_by_id=track_audio_by_id,
         track_meta_by_id=track_meta_by_id,
+        track_popularity_by_id=track_popularity_by_id,
     )
 
     return TrainingDataBundle(
@@ -134,4 +142,5 @@ def build_training_bundle(
         playlist_text_emb_by_id=playlist_text_emb_by_id,
         track_audio_by_id=track_audio_by_id,
         track_meta_by_id=track_meta_by_id,
+        track_popularity_by_id=track_popularity_by_id,
     )

@@ -13,6 +13,8 @@ def test_playlists_are_flattened_and_paginated_with_next_page() -> None:
                 "playlistName": "New Money Trap",
                 "description": "desc",
                 "playlistUrl": "https://open.spotify.com/playlist/2742U9cliLMSuxex35NtVC",
+                "genres": ["Hip-Hop"],
+                "subgenres": ["Trap", "Drill", "Trap"],
             }
         ],
         "nextPage": 2,
@@ -38,5 +40,36 @@ def test_playlists_are_flattened_and_paginated_with_next_page() -> None:
     assert rows[0]["playlist_id"] == "292"
     assert rows[0]["playlist_name"] == "New Money Trap"
     assert rows[0]["playlist_url"] == "https://open.spotify.com/playlist/2742U9cliLMSuxex35NtVC"
+    # Genres pass through as a list; subgenres are deduplicated in order.
+    assert rows[0]["genres"] == ["Hip-Hop"]
+    assert rows[0]["subgenres"] == ["Trap", "Drill"]
     assert mock_get.call_args_list[0].kwargs["params"]["page"] == 1
     assert mock_get.call_args_list[1].kwargs["params"]["page"] == 2
+
+
+def test_playlists_handle_missing_genre_arrays() -> None:
+    page1_payload = {
+        "items": [
+            {
+                "id": 1,
+                "playlistName": "Old Playlist",
+                "description": "desc",
+                "playlistUrl": "https://open.spotify.com/playlist/abc",
+            }
+        ],
+        "nextPage": None,
+    }
+    response1 = Mock()
+    response1.json.return_value = page1_payload
+    response1.raise_for_status.return_value = None
+
+    with patch("matcher_agent.clients.xano_client.requests.get", side_effect=[response1]):
+        client = XanoClient(
+            playlists_url="https://api.example.com/playlists",
+            historical_matches_url="https://api.example.com/historical",
+            page_size=100,
+        )
+        rows = client.fetch_playlists()
+
+    assert rows[0]["genres"] == []
+    assert rows[0]["subgenres"] == []

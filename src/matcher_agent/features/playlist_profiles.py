@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from matcher_agent.features.genre_normalizer import normalize_xano_labels
 from matcher_agent.features.genre_tagger import tag_text
 
 # Audio columns used to build per-playlist accepted-track centroids. Kept small
@@ -57,6 +58,38 @@ def _safe_normalize(vec: np.ndarray) -> np.ndarray:
     return vec / norm
 
 
+def _coerce_label_list(value) -> list[str]:
+    """Best-effort coerce a parquet/csv cell into a clean list[str].
+
+    Pandas may hand us actual list objects (parquet list-typed columns)
+    or stringified lists when the value round-tripped through CSV. Both
+    are handled. Empty / null values yield an empty list.
+    """
+    if value is None:
+        return []
+    if isinstance(value, float) and np.isnan(value):
+        return []
+    if isinstance(value, (list, tuple, set, np.ndarray)):
+        return [str(v).strip() for v in value if v is not None and str(v).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() in ("nan", "none", "[]"):
+            return []
+        # Best-effort: looks like a JSON-encoded list.
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                import json
+
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return [str(v).strip() for v in parsed if str(v).strip()]
+            except Exception:
+                pass
+        # Fallback: comma-separated.
+        return [piece.strip() for piece in text.split(",") if piece.strip()]
+    return []
+
+
 @dataclass
 class PlaylistProfile:
     playlist_id: str
@@ -69,6 +102,12 @@ class PlaylistProfile:
     audio_centroid: np.ndarray | None
     audio_std: np.ndarray | None
     tags: set[str] = field(default_factory=set)
+    # Track-popularity statistics across this playlist's accepted tracks.
+    # `None` means we have no popularity data (no accepted tracks with
+    # popularity recorded). Used by the popularity-fit features.
+    popularity_mean: float | None = None
+    popularity_std: float | None = None
+    popularity_count: int = 0
 
 
 @dataclass
@@ -95,6 +134,9 @@ class ProfileBundle:
                     "playlist_audio_centroid": prof.audio_centroid,
                     "playlist_audio_std": prof.audio_std,
                     "playlist_tags": prof.tags,
+                    "playlist_popularity_mean": prof.popularity_mean,
+                    "playlist_popularity_std": prof.popularity_std,
+                    "playlist_popularity_count": prof.popularity_count,
                 }
             )
         return pd.DataFrame(rows)
@@ -106,6 +148,18 @@ def build_playlist_text_strings(playlists_df: pd.DataFrame) -> list[str]:
 
 def build_track_text_strings(tracks_df: pd.DataFrame) -> list[str]:
     return [_track_text(row) for _, row in tracks_df.iterrows()]
+
+
+def build_track_popularity_lookup(tracks_df: pd.DataFrame) -> dict[str, float]:
+    """Build a track_id -> popularity (0-100, float) lookup. Tracks without
+    popularity (NaN) are simply absent from the dict."""
+    if "popularity" not in tracks_df.columns:
+        return {}
+    sub = tracks_df[["track_id", "popularity"]].copy()
+    sub["track_id"] = sub["track_id"].astype("string")
+    sub["popularity"] = pd.to_numeric(sub["popularity"], errors="coerce")
+    sub = sub.dropna(subset=["track_id", "popularity"])
+    return {str(row["track_id"]): float(row["popularity"]) for _, row in sub.iterrows()}
 
 
 def build_profiles(
@@ -120,6 +174,10 @@ def build_profiles(
     semantic_blend: float = 0.5,
 ) -> ProfileBundle:
     """Compute one PlaylistProfile per playlist in `playlists_df`.
+
+    Tag assembly: each playlist's `tags` is the union of:
+      1. canonical tags from Xano `genres`/`subgenres` arrays (authoritative)
+      2. canonical tags from a regex pass on `playlist_name + description`
 
     semantic_blend controls how much the playlist's own text embedding weighs
     relative to the centroid of its historically accepted tracks:
@@ -153,8 +211,17 @@ def build_profiles(
             if not np.all(np.isnan(vec)):
                 audio_lookup[str(tid)] = vec
 
+    popularity_lookup = build_track_popularity_lookup(tracks_df)
+
     profiles: dict[str, PlaylistProfile] = {}
     embedding_dim = next(iter(playlist_text_emb_by_id.values())).shape[0] if playlist_text_emb_by_id else 384
+
+    has_xano_genres = "genres" in playlists_df.columns
+    has_xano_subgenres = "subgenres" in playlists_df.columns
+
+    n_with_xano_tags = 0
+    n_with_text_tags = 0
+    n_with_popularity = 0
 
     for _, row in playlists_df.iterrows():
         pid = str(row["playlist_id"])
@@ -187,13 +254,43 @@ def build_profiles(
             audio_centroid = None
             audio_std = None
 
+        accepted_pops = [
+            popularity_lookup[t]
+            for t in accepted_track_ids
+            if t in popularity_lookup
+        ]
+        if accepted_pops:
+            popularity_mean = float(np.mean(accepted_pops))
+            popularity_std = float(np.std(accepted_pops))
+            popularity_count = len(accepted_pops)
+            n_with_popularity += 1
+        else:
+            popularity_mean = None
+            popularity_std = None
+            popularity_count = 0
+
         accepted_n = int(accepted_count_by_pl.get(pid, 0))
         declined_n = int(declined_count_by_pl.get(pid, 0))
         total = accepted_n + declined_n
         rate = accepted_n / total if total else 0.0
 
+        # Tags: prefer authoritative Xano genres/subgenres, then add anything
+        # the regex tagger picks up from the title/description.
+        xano_tags = (
+            normalize_xano_labels(
+                _coerce_label_list(row.get("genres")) if has_xano_genres else None,
+                _coerce_label_list(row.get("subgenres")) if has_xano_subgenres else None,
+            )
+            if (has_xano_genres or has_xano_subgenres)
+            else set()
+        )
         playlist_text = _playlist_text(row)
-        tags = tag_text(playlist_text)
+        text_tags = tag_text(playlist_text)
+        tags = xano_tags | text_tags
+        if xano_tags:
+            n_with_xano_tags += 1
+        if text_tags:
+            n_with_text_tags += 1
 
         profiles[pid] = PlaylistProfile(
             playlist_id=pid,
@@ -206,12 +303,17 @@ def build_profiles(
             audio_centroid=audio_centroid,
             audio_std=audio_std,
             tags=tags,
+            popularity_mean=popularity_mean,
+            popularity_std=popularity_std,
+            popularity_count=popularity_count,
         )
 
     print(
         f"[Profiles] Built {len(profiles)} profiles | "
         f"with_audio_centroid={sum(1 for p in profiles.values() if p.audio_centroid is not None)} | "
-        f"with_tags={sum(1 for p in profiles.values() if p.tags)}"
+        f"with_tags={sum(1 for p in profiles.values() if p.tags)} | "
+        f"xano_tagged={n_with_xano_tags} | text_tagged={n_with_text_tags} | "
+        f"with_popularity_stats={n_with_popularity}"
     )
     return ProfileBundle(
         profiles=profiles,

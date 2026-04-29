@@ -41,6 +41,9 @@ class DataRepository:
             "spectral_rolloff",
             "spectral_flux",
             "zcr",
+            # Spotify popularity (0-100). May be missing on old exports;
+            # downstream code treats NaN as "unknown".
+            "popularity",
         ]
         cols = [c for c in track_cols if c in df.columns]
         return df[cols].drop_duplicates(subset=["track_id"]).reset_index(drop=True)

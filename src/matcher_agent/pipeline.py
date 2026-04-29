@@ -25,16 +25,42 @@ async def _download_tracks_parallel(
     *,
     audio_dir: Path,
     download_concurrency: int,
+    progress_every: int = 25,
 ) -> list[tuple[dict, Path | None]]:
     semaphore = asyncio.Semaphore(max(1, download_concurrency))
+    progress_every = max(1, progress_every)
+    total = len(tracks)
+    processed = 0
+    succeeded = 0
+    failed = 0
+    skipped_no_preview = 0
+    progress_lock = asyncio.Lock()
 
     async def _download_one(track: dict) -> tuple[dict, Path | None]:
+        nonlocal processed, succeeded, failed, skipped_no_preview
         if not track.get("preview_url"):
-            return track, None
-        async with semaphore:
-            audio_path = await asyncio.to_thread(
-                download_preview, track["track_id"], track["preview_url"], audio_dir
-            )
+            audio_path: Path | None = None
+            status = "no_preview"
+        else:
+            async with semaphore:
+                audio_path = await asyncio.to_thread(
+                    download_preview, track["track_id"], track["preview_url"], audio_dir
+                )
+            status = "ok" if audio_path else "failed"
+
+        async with progress_lock:
+            processed += 1
+            if status == "ok":
+                succeeded += 1
+            elif status == "failed":
+                failed += 1
+            else:
+                skipped_no_preview += 1
+            if processed % progress_every == 0 or processed == total:
+                print(
+                    f"[Features] Downloads {processed}/{total} "
+                    f"succeeded={succeeded} failed={failed} no_preview={skipped_no_preview}"
+                )
         return track, audio_path
 
     tasks = [_download_one(track) for track in tracks]
@@ -101,6 +127,13 @@ async def build_track_feature_export(
         cached = cached_by_track_id.get(tid)
         if cached:
             merged = dict(cached)
+            # Prefer freshly-fetched popularity (it's the most up-to-date
+            # signal) but fall back to the cached value so previously
+            # populated rows aren't wiped on a subsequent run that
+            # happened to fetch a track without popularity.
+            popularity = track.get("popularity")
+            if popularity is None:
+                popularity = cached.get("popularity")
             merged.update(
                 {
                     "track_id": tid,
@@ -111,6 +144,7 @@ async def build_track_feature_export(
                     "playlist_id": track.get("playlist_id"),
                     "playlist_name": track.get("playlist_name"),
                     "preview_url": track.get("preview_url") or cached.get("preview_url"),
+                    "popularity": popularity,
                 }
             )
             reused_rows.append(merged)
@@ -131,6 +165,7 @@ async def build_track_feature_export(
         tracks_to_analyze,
         audio_dir=audio_dir,
         download_concurrency=download_concurrency,
+        progress_every=progress_every,
     )
 
     analyzed_rows: list[dict] = []

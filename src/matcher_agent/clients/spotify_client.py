@@ -22,7 +22,7 @@ def fetch_playlist_tracks(
     while True:
         resp = sp.playlist_tracks(
             playlist_id,
-            fields="items(track(id,name,artists,album,preview_url,duration_ms)),next",
+            fields="items(track(id,name,artists,album,preview_url,duration_ms,popularity)),next",
             offset=offset,
             limit=50,
         )
@@ -30,6 +30,7 @@ def fetch_playlist_tracks(
             track = item.get("track")
             if not track or not track.get("id"):
                 continue
+            popularity = track.get("popularity")
             tracks.append(
                 {
                     "track_id": track["id"],
@@ -38,6 +39,9 @@ def fetch_playlist_tracks(
                     "album": track["album"]["name"],
                     "duration_ms": track["duration_ms"],
                     "preview_url": track.get("preview_url"),
+                    # Spotify popularity 0-100. None for tracks where
+                    # Spotify chooses to omit it (e.g. some local tracks).
+                    "popularity": int(popularity) if isinstance(popularity, (int, float)) else None,
                 }
             )
             if max_tracks and len(tracks) >= max_tracks:
@@ -61,6 +65,7 @@ def fetch_track_by_id(sp: spotipy.Spotify, track_id: str) -> dict:
                     artist_genres.extend(art.get("genres") or [])
         except Exception as exc:  # pragma: no cover - network-dependent
             print(f"[Spotify] Could not fetch artist genres: {exc}")
+    popularity = t.get("popularity")
     return {
         "track_id": t["id"],
         "track_name": t["name"],
@@ -70,6 +75,7 @@ def fetch_track_by_id(sp: spotipy.Spotify, track_id: str) -> dict:
         "preview_url": t.get("preview_url"),
         "spotify_url": (t.get("external_urls") or {}).get("spotify"),
         "artist_genres": sorted({g.lower() for g in artist_genres}),
+        "popularity": int(popularity) if isinstance(popularity, (int, float)) else None,
     }
 
 

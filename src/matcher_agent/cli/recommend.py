@@ -92,6 +92,7 @@ def main() -> None:
             preview_url=resolved.get("preview_url"),
             spotify_url=resolved.get("spotify_url"),
             artist_genres=resolved.get("artist_genres") or [],
+            popularity=resolved.get("popularity"),
             extra=extra_features,
         ),
         n=args.n,

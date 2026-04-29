@@ -36,6 +36,15 @@ PAIRWISE_FEATURE_COLS: list[str] = [
     "genre_tag_count_track",
     "genre_tag_count_playlist",
     "track_audio_available",
+    # Track popularity vs playlist-accepted-popularity. These let the model
+    # learn the "low-popularity playlists prefer low-popularity tracks"
+    # pattern without leaking absolute popularity (which would bias toward
+    # only-mainstream playlists). Track popularity itself is also exposed,
+    # since some playlists strongly skew one way.
+    "track_popularity_norm",
+    "popularity_diff_norm",
+    "popularity_zscore",
+    "popularity_available",
 ]
 
 
@@ -77,6 +86,51 @@ def _audio_l2(track_audio: np.ndarray, centroid: np.ndarray) -> float:
     return float(np.sqrt(np.mean(diff * diff)))
 
 
+def _popularity_features(
+    track_pop: float | None,
+    playlist_mean: float | None,
+    playlist_std: float | None,
+) -> dict[str, float]:
+    """Compute the popularity-fit features for a (track, playlist) pair.
+
+    Conventions:
+      * `track_popularity_norm` is in [0, 1]; 0 when the track has no popularity.
+      * `popularity_diff_norm` is |track - playlist_mean| / 100, in [0, 1];
+        0 when either side is missing.
+      * `popularity_zscore` uses the playlist's std (with a 5-point floor so
+        playlists with only 1-2 accepted tracks don't blow up). 0 when missing.
+      * `popularity_available` is 1.0 only when BOTH sides are available, so
+        the model can learn to trust the diff signal only when it's real.
+    """
+    if track_pop is None or np.isnan(track_pop):
+        track_norm = 0.0
+        track_known = False
+    else:
+        track_norm = max(0.0, min(1.0, float(track_pop) / 100.0))
+        track_known = True
+
+    if (
+        playlist_mean is None
+        or np.isnan(playlist_mean)
+        or not track_known
+    ):
+        diff_norm = 0.0
+        zscore = 0.0
+        available = 0.0
+    else:
+        diff = abs(float(track_pop) - float(playlist_mean))
+        diff_norm = max(0.0, min(1.0, diff / 100.0))
+        std = float(playlist_std) if playlist_std is not None and not np.isnan(playlist_std) else 0.0
+        zscore = diff / max(std, 5.0)
+        available = 1.0
+    return {
+        "track_popularity_norm": track_norm,
+        "popularity_diff_norm": diff_norm,
+        "popularity_zscore": float(zscore),
+        "popularity_available": available,
+    }
+
+
 def build_track_audio_lookup(
     tracks_df: pd.DataFrame, audio_feature_cols: list[str]
 ) -> dict[str, np.ndarray]:
@@ -109,6 +163,7 @@ def build_pair_features(
     track_text_emb_by_id: dict[str, np.ndarray],
     track_audio_by_id: dict[str, np.ndarray],
     track_meta_by_id: dict[str, dict],
+    track_popularity_by_id: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """Compute pairwise features for every (track_id, playlist_id) row.
 
@@ -125,6 +180,7 @@ def build_pair_features(
     audio_cols = profile_bundle.audio_feature_cols
     audio_dim = len(audio_cols)
     zero_audio = np.full(audio_dim, np.nan, dtype=np.float64) if audio_dim else None
+    pop_lookup = track_popularity_by_id or {}
 
     out_records: list[dict] = []
     for record in rows.to_dict(orient="records"):
@@ -171,6 +227,8 @@ def build_pair_features(
             acceptance_rate = float(prof.acceptance_rate)
             accepted_count = float(prof.accepted_count)
             declined_count = float(prof.declined_count)
+            playlist_pop_mean = prof.popularity_mean
+            playlist_pop_std = prof.popularity_std
         else:
             tags_overlap = 0.0
             overlap_count = 0.0
@@ -179,6 +237,14 @@ def build_pair_features(
             acceptance_rate = 0.0
             accepted_count = 0.0
             declined_count = 0.0
+            playlist_pop_mean = None
+            playlist_pop_std = None
+
+        pop_feats = _popularity_features(
+            pop_lookup.get(tid),
+            playlist_pop_mean,
+            playlist_pop_std,
+        )
 
         out_records.append(
             {
@@ -198,6 +264,7 @@ def build_pair_features(
                 "playlist_accepted_track_count": accepted_count,
                 "playlist_declined_track_count": declined_count,
                 "track_audio_available": track_audio_available,
+                **pop_feats,
             }
         )
 
