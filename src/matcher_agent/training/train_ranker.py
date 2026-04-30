@@ -81,6 +81,7 @@ def train_ranker(
     test_size: float = 0.2,
     full_catalog_eval: bool = True,
     negative_sample_ratio: float = 3.0,
+    negative_conflict_fraction: float = 0.5,
 ) -> RankerTrainResult:
     """Train the ranker with a leakage-free pipeline:
 
@@ -122,6 +123,7 @@ def train_ranker(
             playlists_df=playlists_df,
             train_bundle=train_bundle,
             ratio=negative_sample_ratio,
+            conflict_fraction=negative_conflict_fraction,
             random_state=random_state,
         )
         print(
@@ -261,38 +263,145 @@ def _augment_with_random_negatives(
     train_bundle,
     ratio: float,
     random_state: int,
+    conflict_fraction: float = 0.5,
 ) -> pd.DataFrame:
-    """Add `ratio` random-negative pairs per accepted positive.
+    """Add `ratio` negative pairs per accepted positive.
 
-    Historical "declines" are themselves a curated sample of plausibly-fitting
-    playlists. The model needs to also see truly off-topic playlists (random
-    catalog members) so it can learn the difference between a near-miss and
-    an obvious mismatch.
+    Negatives come in two flavors, in proportions controlled by
+    `conflict_fraction`:
+
+    1. **Genre-conflict hard negatives** (playlist-anchored): for each
+       positive ``(track, accepted_playlist)`` pair, the accepted playlist's
+       canonical tags are used as the genre anchor. We then sample a random
+       different playlist whose tags share NOTHING with the anchor. This
+       avoids the previous track-side bottleneck where regex tagging of
+       short titles like "Bad Habits" produced empty tag sets and the
+       sampler had to fall back to random.
+    2. **Uniform random negatives**: a random catalog playlist (any genre)
+       that the track has not been pitched to. Keeps a baseline of
+       "true off-topic" examples so the model doesn't overfit to the
+       conflict structure.
+
+    Historical "declines" remain in the positive/negative pool unchanged —
+    they're informative as near-miss examples even though genre-controlled.
     """
+    from matcher_agent.features.genre_tagger import tag_text
+
     rng = np.random.default_rng(random_state)
+    profiles = train_bundle.profile_bundle.profiles
     all_playlist_ids = playlists_df["playlist_id"].astype(str).drop_duplicates().tolist()
+
     pitched_by_track: dict[str, set[str]] = {}
     for tid, pid in zip(
         train_matches["track_id"].astype(str), train_matches["playlist_id"].astype(str)
     ):
         pitched_by_track.setdefault(tid, set()).add(pid)
 
+    track_tags_by_id: dict[str, set[str]] = {}
+    for tid, meta in train_bundle.track_meta_by_id.items():
+        cached = meta.get("_cached_tags")
+        if cached is not None:
+            track_tags_by_id[tid] = cached
+        else:
+            text = (
+                f"{meta.get('artist','')} {meta.get('track_name','')} "
+                f"{meta.get('album','')}"
+            ).strip()
+            track_tags_by_id[tid] = tag_text(text)
+
+    playlist_tags_by_id: dict[str, set[str]] = {
+        pid: prof.tags for pid, prof in profiles.items()
+    }
+    tagged_playlist_ids = [pid for pid in all_playlist_ids if playlist_tags_by_id.get(pid)]
+
     positives = train_df[train_df["label"] == 1]
-    n_target = int(len(positives) * ratio)
-    if n_target <= 0:
+    n_total = int(len(positives) * ratio)
+    if n_total <= 0:
         return train_df
 
-    print(f"[Train] Sampling {n_target} random-negative pairs.")
-    sampled_records: list[dict] = []
-    track_ids = positives["track_id"].astype(str).tolist()
-    while len(sampled_records) < n_target:
-        tid = rng.choice(track_ids)
-        pid = rng.choice(all_playlist_ids)
-        already = pitched_by_track.get(tid, set())
-        if pid in already:
-            continue
-        sampled_records.append({"track_id": tid, "playlist_id": pid, "label": 0})
+    conflict_fraction = max(0.0, min(1.0, conflict_fraction))
+    n_conflict_target = int(round(n_total * conflict_fraction))
 
+    positive_pairs = list(
+        zip(
+            positives["track_id"].astype(str).tolist(),
+            positives["playlist_id"].astype(str).tolist(),
+        )
+    )
+    track_ids = [tid for tid, _ in positive_pairs]
+
+    used_neg_pairs: set[tuple[str, str]] = set()
+    conflict_records: list[dict] = []
+    n_skipped_no_anchor_tags = 0
+    n_skipped_no_conflict_found = 0
+    if n_conflict_target > 0 and tagged_playlist_ids:
+        max_attempts_per_record = 80
+        outer_safety_budget = n_conflict_target * 8
+        outer_attempts = 0
+        while len(conflict_records) < n_conflict_target and outer_attempts < outer_safety_budget:
+            outer_attempts += 1
+            idx = int(rng.integers(0, len(positive_pairs)))
+            tid, accepted_pid = positive_pairs[idx]
+            # Prefer the accepted playlist's tags as the genre anchor; fall
+            # back to track-text tags only when the playlist itself is
+            # untagged. Anchoring on the playlist gives much higher coverage
+            # because curator-supplied Xano genres exist for ~75% of the
+            # catalog vs ~10-15% of track titles producing usable regex tags.
+            anchor_tags = playlist_tags_by_id.get(accepted_pid, set())
+            if not anchor_tags:
+                anchor_tags = track_tags_by_id.get(tid, set())
+            if not anchor_tags:
+                n_skipped_no_anchor_tags += 1
+                continue
+
+            pitched = pitched_by_track.get(tid, set())
+            for _ in range(max_attempts_per_record):
+                candidate = tagged_playlist_ids[
+                    int(rng.integers(0, len(tagged_playlist_ids)))
+                ]
+                if candidate in pitched:
+                    continue
+                if (tid, candidate) in used_neg_pairs:
+                    continue
+                cand_tags = playlist_tags_by_id.get(candidate, set())
+                if not cand_tags:
+                    continue
+                if anchor_tags & cand_tags:
+                    continue
+                used_neg_pairs.add((tid, candidate))
+                conflict_records.append(
+                    {"track_id": tid, "playlist_id": candidate, "label": 0}
+                )
+                break
+            else:
+                n_skipped_no_conflict_found += 1
+
+    n_random_target = n_total - len(conflict_records)
+    random_records: list[dict] = []
+    random_attempts = 0
+    random_attempt_budget = max(n_random_target * 20, 1000)
+    while len(random_records) < n_random_target and random_attempts < random_attempt_budget:
+        random_attempts += 1
+        tid = track_ids[int(rng.integers(0, len(track_ids)))]
+        pid = all_playlist_ids[int(rng.integers(0, len(all_playlist_ids)))]
+        if pid in pitched_by_track.get(tid, set()):
+            continue
+        if (tid, pid) in used_neg_pairs:
+            continue
+        used_neg_pairs.add((tid, pid))
+        random_records.append({"track_id": tid, "playlist_id": pid, "label": 0})
+
+    print(
+        f"[Train] Sampling negatives (playlist-anchored): target={n_total} "
+        f"conflict_fraction={conflict_fraction:.2f} "
+        f"got_conflict={len(conflict_records)} got_random={len(random_records)} "
+        f"skipped_no_anchor_tags={n_skipped_no_anchor_tags} "
+        f"skipped_no_conflict_found={n_skipped_no_conflict_found}"
+    )
+
+    sampled_records = conflict_records + random_records
+    if not sampled_records:
+        return train_df
     sampled_df = pd.DataFrame(sampled_records)
     sampled_feats = build_pair_features(
         sampled_df,

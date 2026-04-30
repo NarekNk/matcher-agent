@@ -15,6 +15,11 @@ def test_playlists_are_flattened_and_paginated_with_next_page() -> None:
                 "playlistUrl": "https://open.spotify.com/playlist/2742U9cliLMSuxex35NtVC",
                 "genres": ["Hip-Hop"],
                 "subgenres": ["Trap", "Drill", "Trap"],
+                "activity": ["workout", "party"],
+                "countries": ["USA"],
+                "languages": ["english", "english"],
+                "tempos": ["fast"],
+                "moods": ["energetic", "uplifting"],
             }
         ],
         "nextPage": 2,
@@ -43,6 +48,15 @@ def test_playlists_are_flattened_and_paginated_with_next_page() -> None:
     # Genres pass through as a list; subgenres are deduplicated in order.
     assert rows[0]["genres"] == ["Hip-Hop"]
     assert rows[0]["subgenres"] == ["Trap", "Drill"]
+    # Soft attributes pass through as deduplicated lists; raw values are
+    # preserved (lowercasing/filtering of "any"/"other" happens later in
+    # the profile builder so that it's safe to change those rules without
+    # re-syncing from Xano).
+    assert rows[0]["activity"] == ["workout", "party"]
+    assert rows[0]["countries"] == ["USA"]
+    assert rows[0]["languages"] == ["english"]
+    assert rows[0]["tempos"] == ["fast"]
+    assert rows[0]["moods"] == ["energetic", "uplifting"]
     assert mock_get.call_args_list[0].kwargs["params"]["page"] == 1
     assert mock_get.call_args_list[1].kwargs["params"]["page"] == 2
 
@@ -73,3 +87,9 @@ def test_playlists_handle_missing_genre_arrays() -> None:
 
     assert rows[0]["genres"] == []
     assert rows[0]["subgenres"] == []
+    # Missing soft-attribute arrays should also default to empty lists.
+    assert rows[0]["activity"] == []
+    assert rows[0]["countries"] == []
+    assert rows[0]["languages"] == []
+    assert rows[0]["tempos"] == []
+    assert rows[0]["moods"] == []

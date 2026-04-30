@@ -22,9 +22,11 @@ We fixed that with a redesign focused on **high-precision genre matching**:
    - **Track-vs-playlist popularity fit**: `track_popularity_norm`, `popularity_diff_norm`, `popularity_zscore`, `popularity_available`. The model can learn that low-popularity playlists prefer low-popularity tracks without using raw playlist popularity as a confounder. Stats are computed across the playlist's *accepted* tracks only.
 3. **Curator-tagged genres from Xano.** Every playlist row in Xano now exposes `genres` (e.g. `"Hip-Hop"`) and `subgenres` (e.g. `"Trap"`, `"Drill"`, `"Lo-fi Hip-Hop"`) string arrays. These are the most authoritative genre signal we have and are mapped to a canonical tag set by `features/genre_normalizer.py` (which also handles Spotify-style strings like `"west coast rap"`, `"drum and bass"`, `"neo soul"`).
 4. **Spotify artist genres + popularity at inference.** When you call `recommend` with a Spotify track ID, we fetch the artists' genres AND the track's `popularity` (0-100). Genres are normalized to canonical tags; popularity flows into the popularity-fit features.
-5. **Hard genre-conflict filter.** Predictions for playlists that conflict with the track's genre (e.g. country track → hip-hop playlist) are multiplied by `0.05`, pushing them out of the top-`n`.
-6. **Leakage-free training.** Train/test split is grouped by `track_id` *before* building any playlist profile, so no test track ever influences the playlist features used to score it.
-7. **Realistic evaluation.** Each held-out track is scored against the **full catalog** of 1,668 playlists (not just the few it was historically pitched to).
+5. **Genre-conflict hard negatives at training time.** Historical pitches are pre-filtered by curators (nobody pitches country to a hip-hop playlist), so within them the genre overlap signal is near-constant — useless to the model. The conflict sampler is *playlist-anchored*: for each positive `(track, accepted_playlist)`, it uses the **accepted playlist's** canonical tags as the genre anchor and finds a different playlist whose tags are disjoint. This works even when the track's title has no detectable genre keywords (e.g. "Bad Habits"), and gives ~50% conflict coverage in practice (vs. ~13% with track-title-only anchoring).
+6. **Hard genre-conflict filter at inference.** Predictions for playlists that conflict with the track's genre (e.g. country track → hip-hop playlist) are multiplied by `0.05`, pushing them out of the top-`n`.
+7. **Soft curator attributes (mood, language, activity, country, tempo).** Xano playlists now also carry `activity`, `countries`, `languages`, `tempos`, `moods` arrays. These are sparse on the curator side (mostly `"any"` / `"other"`) and absent on the historical training data, so they are **not** model features. Instead, when the user supplies the matching optional inputs at prediction time (`--track-mood energetic`, `--track-language english`, ...), the inference service applies a small multiplicative penalty (`SOFT_ATTRIBUTE_PENALTY=0.7` per disagreeing attribute) on top of the model's score. No penalty fires when either side leaves the field empty / "any".
+8. **Leakage-free training.** Train/test split is grouped by `track_id` *before* building any playlist profile, so no test track ever influences the playlist features used to score it.
+9. **Realistic evaluation.** Each held-out track is scored against the **full catalog** of 1,668 playlists (not just the few it was historically pitched to).
 
 ---
 
@@ -47,9 +49,10 @@ src/matcher_agent/
     text_embedder.py    # Sentence-Transformer with on-disk Parquet cache
   features/
     feature_builder.py    # Pairwise (track,playlist) feature matrix incl. popularity-fit
-    playlist_profiles.py  # Per-playlist semantic/audio centroids, tags, popularity stats
+    playlist_profiles.py  # Per-playlist semantic/audio centroids, tags, popularity, soft attrs
     genre_tagger.py       # Rule-based genre regex + conflict groups
     genre_normalizer.py   # Xano genres/subgenres + Spotify labels → canonical tags
+    attribute_normalizer.py # Mood / activity / language / country / tempo (drops "any"/"other")
     audio_features.py     # Essentia BPM/MFCC/loudness/etc.
   inference/
     candidates.py     # Candidate playlist pool
@@ -91,8 +94,24 @@ FEATURE_ANALYSIS_WORKERS=
 FEATURE_PROGRESS_EVERY=25
 # Genre & negative sampling knobs
 HARD_GENRE_FILTER=true
-NEGATIVE_SAMPLE_RATIO=0.0
-SEMANTIC_BLEND=0.5
+# How many negatives to sample per accepted positive at training time.
+# 0 disables — DO NOT set to 0 unless you've already trained with hard
+# negatives at least once. Without these the model can't learn what an
+# obvious genre mismatch looks like (historical pitches are already
+# genre-controlled by curators).
+NEGATIVE_SAMPLE_RATIO=5.0
+# Fraction of the negative budget that must be genre-CONFLICTING (zero
+# canonical-tag overlap with the track). 0.5 = half conflict / half random.
+NEGATIVE_CONFLICT_FRACTION=0.5
+# How much weight the playlist's own title/description embedding gets
+# vs. the centroid of accepted tracks when forming the playlist's
+# semantic profile. Lower = trust accepted-tracks more (recommended
+# 0.2-0.3 because many playlist names are too generic).
+SEMANTIC_BLEND=0.25
+# Multiplicative penalty per disagreeing soft attribute (mood, language,
+# activity, country, tempo) at prediction time. Range (0, 1]. 1.0 disables.
+# 0.7 = ~30% drop per attribute conflict.
+SOFT_ATTRIBUTE_PENALTY=0.7
 ```
 
 ---
@@ -118,6 +137,20 @@ PYTHONPATH=src music-env/bin/python -m matcher_agent.cli.train
 PYTHONPATH=src music-env/bin/python -m matcher_agent.cli.recommend \
   --spotify-track-id 0VjIjW4GlUZAMYd2vXMi3b --n 10
 ```
+
+Optional curator-style track attributes (all repeatable, all optional):
+
+```bash
+PYTHONPATH=src music-env/bin/python -m matcher_agent.cli.recommend \
+  --spotify-track-id 0VjIjW4GlUZAMYd2vXMi3b --n 10 \
+  --track-genre "Hip-Hop" --track-subgenre "Drill" \
+  --track-mood "energetic" --track-mood "aggressive" \
+  --track-activity "workout" \
+  --track-language "english" \
+  --track-country "USA"
+```
+
+`--track-genre` / `--track-subgenre` use the Xano vocabulary (top-level genre / subgenre strings) and are *additive* on top of any Spotify-derived `artist_genres`. `--track-mood`, `--track-activity`, `--track-language`, `--track-country`, `--track-tempo` are matched against the curator-tagged playlist attributes; mismatches apply a soft `SOFT_ATTRIBUTE_PENALTY` to the score.
 
 To bypass the genre conflict filter:
 
@@ -145,6 +178,7 @@ Optional query params:
 - `track_id` (alias for `spotify_track_id`)
 - `tracks_csv` (default: `output/training_data.csv`)
 - `no_genre_filter=1` (disables hard genre conflict filter)
+- `track_genre`, `track_subgenre`, `track_mood`, `track_activity`, `track_language`, `track_country`, `track_tempo` — repeatable, all optional. Example: `?spotify_track_id=...&track_mood=energetic&track_mood=uplifting&track_language=english`
 
 Response fields per result now include:
 - `playlist_id` (internal id)
@@ -174,18 +208,20 @@ This runs six archetype tracks (pop / hip-hop / country / EDM / latin / indie fo
 
 ## Notes on metrics
 
-- **AUC-PR / AUC-ROC** are computed on the held-out historical pitches.
+- **AUC-PR / AUC-ROC** are computed on the held-out historical pitches + the sampled negatives (so they reflect the train-time task: distinguishing real pitches from obvious mismatches).
 - **Hit@K / Precision@K / Recall@K / MRR** are computed against the **full 1,668-playlist catalog** per held-out track. They are intentionally low because each test track had only 1–3 historical pitches in the catalog — recommending other genre-correct playlists doesn't count even when it's the right answer. Treat them as a lower bound and use `qualitative_demo.py` as the deployment-relevance check.
-- **Feature importances** are written to `output/feature_importance.csv`. After the fix, `semantic_similarity` and `title_text_similarity` dominate (~92%), with audio, genre, and popularity-fit features filling the rest. No `*_id` or `playlist_acceptance_rate` features — that's the point.
+- **`genre_precision_at_K`** is the most useful deployment-quality metric: among the top-K predictions, what fraction share at least one canonical genre tag with the track. Phase 1 targets bringing this from ~0.23 to >0.5.
+- **Feature importances** are written to `output/feature_importance.csv`. With genre-conflict hard negatives turned on, `genre_jaccard`, `genre_overlap_count`, and `genre_conflict_flag` should rise substantially in importance — they only become discriminative once the model sees genuinely off-genre pairs.
+- **Excluded from the model**: `playlist_acceptance_rate`, `playlist_accepted_track_count`, `playlist_declined_track_count` (popularity confounders) and `genre_tag_count_track`, `genre_tag_count_playlist` (data-completeness proxies, not genre-fit signals). They are still computed and saved in the eval CSV for inspection.
 
 ---
 
 ## Re-syncing after these changes
 
-The Xano genre/subgenre arrays and the Spotify popularity field are NEW data fields. To pick them up on existing local snapshots:
+The Xano genre/subgenre/activity/country/language/tempo/mood arrays and the Spotify popularity field are NEW data fields. To pick them up on existing local snapshots:
 
 ```bash
-# 1. Refresh the playlists table so each row has genres / subgenres.
+# 1. Refresh the playlists table so each row has the new arrays.
 #    Use --full-refresh because incremental sync only updates rows that
 #    Xano marked as updated; old rows otherwise keep their stale schema.
 PYTHONPATH=src music-env/bin/python -m matcher_agent.cli.sync_xano --full-refresh
@@ -195,9 +231,11 @@ PYTHONPATH=src music-env/bin/python -m matcher_agent.cli.sync_xano --full-refres
 #    fetch, no audio re-download).
 PYTHONPATH=src music-env/bin/python -m matcher_agent.cli.build_features
 
-# 3. Re-train. The model contract now includes 4 popularity features so
-#    old artifacts are incompatible.
+# 3. Re-train. The model contract includes 4 popularity features but does
+#    NOT include the soft attributes (no track-side training data exists
+#    for them — they are inference-time-only). Older artifacts still need
+#    a retrain because of the popularity features.
 PYTHONPATH=src music-env/bin/python -m matcher_agent.cli.train
 ```
 
-If you skip step 1 the model still trains, but playlists fall back to regex-only tags (less precise). If you skip step 2 the popularity-fit features will be all zeros for every track.
+If you skip step 1 the model still trains, but playlists fall back to regex-only tags (less precise) and the soft-attribute penalty has nothing to compare against. If you skip step 2 the popularity-fit features will be all zeros for every track.

@@ -23,6 +23,16 @@ from matcher_agent.features.playlist_profiles import (
 # cause it to recommend the same handful of high-acceptance playlists for
 # every track regardless of genre. They are still computed and exposed for
 # downstream re-ranking, just not fed to the GBM.
+#
+# NOTE: `genre_tag_count_track` and `genre_tag_count_playlist` are also
+# excluded from the model. They were Top-4 in importance only because they
+# acted as a proxy for "is this row Xano-tagged with a rich genre profile",
+# which is a data-completeness signal, not a genre-fit signal. The real
+# genre fit lives in `genre_jaccard`, `genre_overlap_count`, and
+# `genre_conflict_flag` — which only become discriminative once we add
+# genre-conflict hard negatives during training. We still COMPUTE the count
+# columns in `build_pair_features` so older saved models that include them
+# in their `feature_columns` still load and infer correctly.
 PAIRWISE_FEATURE_COLS: list[str] = [
     "semantic_similarity",
     "title_text_similarity",
@@ -33,8 +43,6 @@ PAIRWISE_FEATURE_COLS: list[str] = [
     "genre_jaccard",
     "genre_overlap_count",
     "genre_conflict_flag",
-    "genre_tag_count_track",
-    "genre_tag_count_playlist",
     "track_audio_available",
     # Track popularity vs playlist-accepted-popularity. These let the model
     # learn the "low-popularity playlists prefer low-popularity tracks"

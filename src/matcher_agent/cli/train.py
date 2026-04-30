@@ -21,14 +21,23 @@ def main() -> None:
         type=float,
         default=None,
         help="Weight on the playlist's own text embedding when blending with the "
-        "centroid of accepted tracks. Defaults to SEMANTIC_BLEND env var (0.5).",
+        "centroid of accepted tracks. Defaults to SEMANTIC_BLEND env var (0.25).",
     )
     parser.add_argument(
         "--negative-sample-ratio",
         type=float,
         default=None,
-        help="Random-negative pairs per accepted positive. Defaults to "
-        "NEGATIVE_SAMPLE_RATIO env var (3.0). Use 0 to disable.",
+        help="Negative pairs sampled per accepted positive. Defaults to "
+        "NEGATIVE_SAMPLE_RATIO env var (5.0). Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--negative-conflict-fraction",
+        type=float,
+        default=None,
+        help="Fraction of negatives that must be genre-conflicting (zero "
+        "canonical-tag overlap with the track). Defaults to "
+        "NEGATIVE_CONFLICT_FRACTION env var (0.5). Use 0 for pure random "
+        "sampling, 1 for only genre-conflict negatives.",
     )
     args = parser.parse_args()
 
@@ -41,6 +50,11 @@ def main() -> None:
         args.negative_sample_ratio
         if args.negative_sample_ratio is not None
         else settings.negative_sample_ratio
+    )
+    negative_conflict_fraction = (
+        args.negative_conflict_fraction
+        if args.negative_conflict_fraction is not None
+        else settings.negative_conflict_fraction
     )
 
     repo = DataRepository(ParquetStore(settings.data_dir))
@@ -59,6 +73,11 @@ def main() -> None:
         device=settings.text_embedding_device,
     )
 
+    print(
+        f"[TrainCLI] Training config: semantic_blend={semantic_blend} "
+        f"negative_sample_ratio={negative_sample_ratio} "
+        f"negative_conflict_fraction={negative_conflict_fraction}"
+    )
     result = train_ranker(
         matches_df=labeled_matches,
         tracks_df=tracks_df,
@@ -69,6 +88,7 @@ def main() -> None:
         random_state=settings.random_state,
         semantic_blend=semantic_blend,
         negative_sample_ratio=negative_sample_ratio,
+        negative_conflict_fraction=negative_conflict_fraction,
     )
     print(
         f"[TrainCLI] Completed: rows={result.rows} auc_pr={result.auc_pr:.4f} "

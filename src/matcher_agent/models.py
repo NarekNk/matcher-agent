@@ -17,6 +17,23 @@ class TrackInput:
     # Spotify popularity 0-100. None means "unknown" — popularity-fit
     # features will fall back to neutral values for this track.
     popularity: int | None = None
+    # ----- Optional curator-style attributes supplied at prediction time -----
+    # All are *optional*: leave the lists empty to opt out of the related
+    # signals. These don't exist in the historical training data, so they
+    # are NOT model features. The inference service uses them as a small
+    # post-rerank multiplier (drops a candidate's score when the playlist's
+    # curator-set attribute disagrees with the supplied track value).
+    #
+    # `genres` / `subgenres` follow the Xano vocabulary (top-level genre and
+    # subgenre strings respectively). They feed the genre tag set used by
+    # the hard genre filter and are mapped through `normalize_xano_labels`.
+    genres: list[str] = field(default_factory=list)
+    subgenres: list[str] = field(default_factory=list)
+    activities: list[str] = field(default_factory=list)
+    countries: list[str] = field(default_factory=list)
+    languages: list[str] = field(default_factory=list)
+    tempos: list[str] = field(default_factory=list)
+    moods: list[str] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

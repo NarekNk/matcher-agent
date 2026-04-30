@@ -26,6 +26,52 @@ def main() -> None:
         action="store_true",
         help="Disable hard genre conflict filtering (returns raw GBM scores).",
     )
+    # Optional curator-style track attributes. Each may be repeated on the
+    # CLI for multi-value sets, e.g. `--track-mood energetic --track-mood
+    # uplifting`. All are passed through as-is and normalized inside the
+    # service. None of these are required.
+    parser.add_argument(
+        "--track-genre",
+        action="append",
+        default=[],
+        help="Top-level Xano-style track genre (repeatable, e.g. --track-genre Pop).",
+    )
+    parser.add_argument(
+        "--track-subgenre",
+        action="append",
+        default=[],
+        help="Track subgenre (repeatable).",
+    )
+    parser.add_argument(
+        "--track-mood",
+        action="append",
+        default=[],
+        help="Track mood label (repeatable, e.g. --track-mood energetic).",
+    )
+    parser.add_argument(
+        "--track-activity",
+        action="append",
+        default=[],
+        help="Track activity label (repeatable, e.g. --track-activity workout).",
+    )
+    parser.add_argument(
+        "--track-language",
+        action="append",
+        default=[],
+        help="Track language (repeatable, e.g. --track-language english).",
+    )
+    parser.add_argument(
+        "--track-country",
+        action="append",
+        default=[],
+        help="Track country (repeatable).",
+    )
+    parser.add_argument(
+        "--track-tempo",
+        action="append",
+        default=[],
+        help="Track tempo descriptor (repeatable).",
+    )
     args = parser.parse_args()
 
     print("[RecommendCLI] Starting recommendation request.")
@@ -81,6 +127,11 @@ def main() -> None:
         text_embedder=embedder,
         semantic_blend=settings.semantic_blend,
         hard_genre_filter=not args.no_genre_filter and settings.hard_genre_filter,
+        soft_attribute_penalty=settings.soft_attribute_penalty,
+        explicit_genre_no_match_penalty=settings.explicit_genre_no_match_penalty,
+        explicit_genre_untagged_penalty=settings.explicit_genre_untagged_penalty,
+        explicit_genre_subgenre_only_penalty=settings.explicit_genre_subgenre_only_penalty,
+        explicit_genre_broadtag_threshold=settings.explicit_genre_broadtag_threshold,
     )
     recs = service.recommend_playlists(
         TrackInput(
@@ -93,6 +144,13 @@ def main() -> None:
             spotify_url=resolved.get("spotify_url"),
             artist_genres=resolved.get("artist_genres") or [],
             popularity=resolved.get("popularity"),
+            genres=args.track_genre,
+            subgenres=args.track_subgenre,
+            moods=args.track_mood,
+            activities=args.track_activity,
+            languages=args.track_language,
+            countries=args.track_country,
+            tempos=args.track_tempo,
             extra=extra_features,
         ),
         n=args.n,

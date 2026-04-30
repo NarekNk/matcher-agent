@@ -122,6 +122,16 @@ class XanoClient:
                     # canonical tags.
                     "genres": self._as_str_list(row.get("genres")),
                     "subgenres": self._as_str_list(row.get("subgenres")),
+                    # Soft attributes. Stored as raw list[str] -- the
+                    # downstream `attribute_normalizer.normalize_attribute_labels`
+                    # drops "any"/"other"/null and lowercases the rest. We keep
+                    # the raw values here so older normalization rules can
+                    # change without forcing a full re-sync from Xano.
+                    "activity": self._as_str_list(row.get("activity")),
+                    "countries": self._as_str_list(row.get("countries")),
+                    "languages": self._as_str_list(row.get("languages")),
+                    "tempos": self._as_str_list(row.get("tempos")),
+                    "moods": self._as_str_list(row.get("moods")),
                 }
             )
         print(f"[Xano:playlists] normalized_rows={len(normalized)}")

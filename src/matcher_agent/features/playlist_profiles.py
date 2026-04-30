@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from matcher_agent.features.attribute_normalizer import (
+    SOFT_ATTRIBUTE_NAMES,
+    normalize_attribute_labels,
+)
 from matcher_agent.features.genre_normalizer import normalize_xano_labels
 from matcher_agent.features.genre_tagger import tag_text
 
@@ -102,12 +106,38 @@ class PlaylistProfile:
     audio_centroid: np.ndarray | None
     audio_std: np.ndarray | None
     tags: set[str] = field(default_factory=set)
+    # Canonical tags derived from the Xano top-level `genres` array only
+    # (i.e. the curator's *primary* genre selection, NOT subgenres or text-
+    # extracted tags). Used by the strict explicit-genre filter at inference
+    # time to differentiate "this playlist is genuinely a Blues playlist"
+    # from "this rock playlist happens to have 'Blues Rock' as a subgenre".
+    primary_tags: set[str] = field(default_factory=set)
     # Track-popularity statistics across this playlist's accepted tracks.
     # `None` means we have no popularity data (no accepted tracks with
     # popularity recorded). Used by the popularity-fit features.
     popularity_mean: float | None = None
     popularity_std: float | None = None
     popularity_count: int = 0
+    # Curator-supplied "soft" attributes from the Xano playlist payload.
+    # An empty set means "no preference" (the curator selected "any"/"other"
+    # or left it null). Used by the inference-time soft-attribute penalty,
+    # never by the trained model (we have no track-side training data for
+    # these attributes, so they cannot be learned).
+    activities: set[str] = field(default_factory=set)
+    countries: set[str] = field(default_factory=set)
+    languages: set[str] = field(default_factory=set)
+    tempos: set[str] = field(default_factory=set)
+    moods: set[str] = field(default_factory=set)
+
+    def soft_attribute_sets(self) -> dict[str, set[str]]:
+        """Return the soft-attribute sets keyed by canonical name."""
+        return {
+            "activities": self.activities,
+            "countries": self.countries,
+            "languages": self.languages,
+            "tempos": self.tempos,
+            "moods": self.moods,
+        }
 
 
 @dataclass
@@ -219,9 +249,23 @@ def build_profiles(
     has_xano_genres = "genres" in playlists_df.columns
     has_xano_subgenres = "subgenres" in playlists_df.columns
 
+    # Soft-attribute columns. Each may be missing on older playlist parquet
+    # files; we default to an empty set in that case.
+    soft_attr_columns: dict[str, str] = {
+        "activities": "activity",
+        "countries": "countries",
+        "languages": "languages",
+        "tempos": "tempos",
+        "moods": "moods",
+    }
+    soft_attr_present: dict[str, bool] = {
+        attr: col in playlists_df.columns for attr, col in soft_attr_columns.items()
+    }
+
     n_with_xano_tags = 0
     n_with_text_tags = 0
     n_with_popularity = 0
+    n_with_soft_attrs: dict[str, int] = {a: 0 for a in soft_attr_columns}
 
     for _, row in playlists_df.iterrows():
         pid = str(row["playlist_id"])
@@ -275,15 +319,28 @@ def build_profiles(
         rate = accepted_n / total if total else 0.0
 
         # Tags: prefer authoritative Xano genres/subgenres, then add anything
-        # the regex tagger picks up from the title/description.
-        xano_tags = (
+        # the regex tagger picks up from the title/description. We also keep
+        # the "primary" subset (canonical tags coming exclusively from the
+        # `genres` array) so the explicit-genre filter can distinguish a
+        # playlist that *is* a blues playlist from a rock playlist that
+        # happens to include "Blues Rock" as a subgenre.
+        primary_xano_tags = (
             normalize_xano_labels(
                 _coerce_label_list(row.get("genres")) if has_xano_genres else None,
-                _coerce_label_list(row.get("subgenres")) if has_xano_subgenres else None,
+                None,
             )
-            if (has_xano_genres or has_xano_subgenres)
+            if has_xano_genres
             else set()
         )
+        subgenre_xano_tags = (
+            normalize_xano_labels(
+                None,
+                _coerce_label_list(row.get("subgenres")) if has_xano_subgenres else None,
+            )
+            if has_xano_subgenres
+            else set()
+        )
+        xano_tags = primary_xano_tags | subgenre_xano_tags
         playlist_text = _playlist_text(row)
         text_tags = tag_text(playlist_text)
         tags = xano_tags | text_tags
@@ -291,6 +348,19 @@ def build_profiles(
             n_with_xano_tags += 1
         if text_tags:
             n_with_text_tags += 1
+
+        # Soft attributes — normalized lowercase sets, with "any"/"other"/
+        # null already filtered out. Empty set => no preference.
+        soft_attrs: dict[str, set[str]] = {}
+        for attr_name, raw_col in soft_attr_columns.items():
+            if not soft_attr_present[attr_name]:
+                soft_attrs[attr_name] = set()
+                continue
+            raw_values = _coerce_label_list(row.get(raw_col))
+            normalized = normalize_attribute_labels(raw_values)
+            soft_attrs[attr_name] = normalized
+            if normalized:
+                n_with_soft_attrs[attr_name] += 1
 
         profiles[pid] = PlaylistProfile(
             playlist_id=pid,
@@ -303,17 +373,27 @@ def build_profiles(
             audio_centroid=audio_centroid,
             audio_std=audio_std,
             tags=tags,
+            primary_tags=primary_xano_tags,
             popularity_mean=popularity_mean,
             popularity_std=popularity_std,
             popularity_count=popularity_count,
+            activities=soft_attrs["activities"],
+            countries=soft_attrs["countries"],
+            languages=soft_attrs["languages"],
+            tempos=soft_attrs["tempos"],
+            moods=soft_attrs["moods"],
         )
 
+    soft_attr_summary = " ".join(
+        f"{name}={n_with_soft_attrs[name]}" for name in soft_attr_columns
+    )
     print(
         f"[Profiles] Built {len(profiles)} profiles | "
         f"with_audio_centroid={sum(1 for p in profiles.values() if p.audio_centroid is not None)} | "
         f"with_tags={sum(1 for p in profiles.values() if p.tags)} | "
         f"xano_tagged={n_with_xano_tags} | text_tagged={n_with_text_tags} | "
-        f"with_popularity_stats={n_with_popularity}"
+        f"with_popularity_stats={n_with_popularity} | "
+        f"soft_attrs[{soft_attr_summary}]"
     )
     return ProfileBundle(
         profiles=profiles,

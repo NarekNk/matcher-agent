@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +20,14 @@ class _DummyExecutor:
 
     def map(self, fn, iterable):
         return map(fn, iterable)
+
+    def submit(self, fn, *args, **kwargs):
+        fut: Future = Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except Exception as exc:  # pragma: no cover - defensive in test double
+            fut.set_exception(exc)
+        return fut
 
 
 def test_build_features_parallel_path_keeps_cache_and_dedupes(

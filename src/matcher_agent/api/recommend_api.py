@@ -25,12 +25,26 @@ def _extract_json_array(raw: str) -> list[dict]:
     raise ValueError("Could not parse JSON payload from recommend command output.")
 
 
+# Mapping from query-param name to the matching `recommend.py` CLI flag.
+# Each is repeatable on the CLI side, so we forward every value supplied.
+_TRACK_ATTR_QUERY_TO_FLAG: dict[str, str] = {
+    "track_genre": "--track-genre",
+    "track_subgenre": "--track-subgenre",
+    "track_mood": "--track-mood",
+    "track_activity": "--track-activity",
+    "track_language": "--track-language",
+    "track_country": "--track-country",
+    "track_tempo": "--track-tempo",
+}
+
+
 def _run_recommend_cli(
     *,
     spotify_track_id: str,
     n: int,
     tracks_csv: str,
     no_genre_filter: bool,
+    track_attributes: dict[str, list[str]],
 ) -> list[dict]:
     cmd = [
         sys.executable,
@@ -45,6 +59,15 @@ def _run_recommend_cli(
     ]
     if no_genre_filter:
         cmd.append("--no-genre-filter")
+    for query_name, values in track_attributes.items():
+        flag = _TRACK_ATTR_QUERY_TO_FLAG.get(query_name)
+        if not flag:
+            continue
+        for v in values:
+            v_clean = (v or "").strip()
+            if not v_clean:
+                continue
+            cmd.extend([flag, v_clean])
 
     env = os.environ.copy()
     env["PYTHONPATH"] = env.get("PYTHONPATH") or "src"
@@ -55,6 +78,18 @@ def _run_recommend_cli(
         env=env,
         check=False,
     )
+    # Forward the CLI's stdout / stderr (the `[Recommend] ...` and
+    # `[RecommendCLI] ...` log lines) to the API server's terminal so the
+    # operator can see what the model is doing — filter activations,
+    # genre tags, soft-attribute penalties, etc. Without this, the lines
+    # are silently discarded by `capture_output=True` and debugging the
+    # explicit-genre filter is essentially impossible.
+    if proc.stdout:
+        for line in proc.stdout.splitlines():
+            print(f"[recommend-cli] {line}", flush=True)
+    if proc.stderr:
+        for line in proc.stderr.splitlines():
+            print(f"[recommend-cli:err] {line}", flush=True, file=sys.stderr)
     if proc.returncode != 0:
         raise RuntimeError(
             f"recommend CLI failed with code {proc.returncode}: {proc.stderr.strip() or proc.stdout.strip()}"
@@ -137,6 +172,11 @@ class RecommendHandler(BaseHTTPRequestHandler):
             "True",
         }
         tracks_csv = (query.get("tracks_csv") or ["output/training_data.csv"])[0]
+        # Optional repeatable track-attribute query params:
+        #   /recommend?...&track_genre=Pop&track_genre=Rock&track_mood=energetic
+        track_attributes: dict[str, list[str]] = {
+            name: list(query.get(name) or []) for name in _TRACK_ATTR_QUERY_TO_FLAG
+        }
 
         if not spotify_track_id:
             self._write_json(
@@ -158,6 +198,7 @@ class RecommendHandler(BaseHTTPRequestHandler):
                 n=n,
                 tracks_csv=tracks_csv,
                 no_genre_filter=no_genre_filter,
+                track_attributes=track_attributes,
             )
             recs = _enrich_recommendations_with_spotify_meta(recs)
         except Exception as exc:
@@ -170,6 +211,7 @@ class RecommendHandler(BaseHTTPRequestHandler):
                 "spotify_track_id": spotify_track_id,
                 "n": n,
                 "count": len(recs),
+                "track_attributes": {k: v for k, v in track_attributes.items() if v},
                 "results": recs,
             },
         )
@@ -188,6 +230,10 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), RecommendHandler)
     print(f"[RecommendAPI] Listening on http://{args.host}:{args.port}")
     print("[RecommendAPI] GET /recommend?spotify_track_id=<id>&n=<int>")
+    print(
+        "[RecommendAPI]   Optional (repeatable): track_genre, track_subgenre, "
+        "track_mood, track_activity, track_language, track_country, track_tempo"
+    )
     print("[RecommendAPI] GET /health")
     try:
         server.serve_forever()

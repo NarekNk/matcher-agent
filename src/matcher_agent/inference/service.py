@@ -7,12 +7,16 @@ import pandas as pd
 
 from matcher_agent.artifacts.io import load_bundle
 from matcher_agent.embeddings import TextEmbedder
+from matcher_agent.features.attribute_normalizer import normalize_attribute_labels
 from matcher_agent.features.feature_builder import (
     build_pair_features,
     build_track_audio_lookup,
     build_track_meta_lookup,
 )
-from matcher_agent.features.genre_normalizer import normalize_external_labels
+from matcher_agent.features.genre_normalizer import (
+    normalize_external_labels,
+    normalize_xano_labels,
+)
 from matcher_agent.features.genre_tagger import has_conflict, tag_text
 from matcher_agent.features.playlist_profiles import (
     AUDIO_FEATURE_COLS,
@@ -38,6 +42,11 @@ class MatcherService:
         *,
         semantic_blend: float = 0.5,
         hard_genre_filter: bool = True,
+        soft_attribute_penalty: float = 0.7,
+        explicit_genre_no_match_penalty: float = 0.02,
+        explicit_genre_untagged_penalty: float = 0.3,
+        explicit_genre_subgenre_only_penalty: float = 0.4,
+        explicit_genre_broadtag_threshold: int = 4,
     ):
         print(f"[Recommend] Loading model artifacts from {artifact_dir}")
         bundle = load_bundle(Path(artifact_dir))
@@ -45,6 +54,34 @@ class MatcherService:
         self.feature_columns = bundle["feature_columns"]
         self.text_embedder = text_embedder
         self.hard_genre_filter = hard_genre_filter
+        # Clamp into (0, 1]; 1.0 disables soft penalties.
+        self.soft_attribute_penalty = max(1e-6, min(1.0, float(soft_attribute_penalty)))
+        # When the user explicitly supplies track genres/subgenres we switch
+        # from "conflict avoidance" to a stricter "positive overlap required"
+        # filter. These two knobs control that behavior:
+        #   * `explicit_genre_no_match_penalty` -- multiplier for playlists
+        #     whose canonical Xano tags do not share ANY tag with the user-
+        #     supplied genres (default 0.02 ~ effectively dropped).
+        #   * `explicit_genre_untagged_penalty` -- multiplier for playlists
+        #     that have no Xano tags at all (we cannot verify fit, so we
+        #     down-weight but don't drop -- default 0.3).
+        self.explicit_genre_no_match_penalty = max(
+            1e-6, min(1.0, float(explicit_genre_no_match_penalty))
+        )
+        self.explicit_genre_untagged_penalty = max(
+            1e-6, min(1.0, float(explicit_genre_untagged_penalty))
+        )
+        # Tier penalty for "matched only via a subgenre" (e.g. a Rock
+        # playlist with subgenre 'Blues Rock' against a Blues track).
+        self.explicit_genre_subgenre_only_penalty = max(
+            1e-6, min(1.0, float(explicit_genre_subgenre_only_penalty))
+        )
+        # Over-tagging guard: playlists with more primary Xano genres than
+        # this threshold get scaled down (curator selected the entire
+        # genre dropdown -> generic catch-all -> not a real match).
+        self.explicit_genre_broadtag_threshold = max(
+            1, int(explicit_genre_broadtag_threshold)
+        )
 
         playlists_df = playlists_df.copy()
         playlists_df["playlist_id"] = playlists_df["playlist_id"].astype("string")
@@ -110,14 +147,33 @@ class MatcherService:
         )
 
     def _track_text_for_input(self, track: TrackInput) -> str:
+        """Build the text we embed for `semantic_similarity`.
+
+        We inject every authoritative genre signal we have into the text:
+          1. Spotify-provided `artist_genres` (works for well-known artists).
+          2. User-supplied `track.genres` and `track.subgenres` (high-confidence
+             curator-style labels). Without this injection, the user-supplied
+             genres only flow into the discrete `genre_*` features (low model
+             importance) and are invisible to the dominant `semantic_similarity`
+             signal -- which is why obscure artists with only user-supplied
+             genres got matched to genre-irrelevant playlists.
+        """
         artist = (track.artist or "").strip()
         name = (track.track_name or "").strip()
         base = f"{artist} - {name}" if (artist and name) else (name or artist)
-        # Inject Spotify-provided artist genres into the embedded text so the
-        # semantic vector carries genre information even when the title doesn't.
-        if track.artist_genres:
-            genre_phrase = ", ".join(track.artist_genres)
-            return f"{base}. Genres: {genre_phrase}."
+        genre_terms: list[str] = []
+        for source in (track.artist_genres, track.genres, track.subgenres):
+            if source:
+                genre_terms.extend(source)
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for term in genre_terms:
+            t = (term or "").strip().lower()
+            if t and t not in seen:
+                seen.add(t)
+                deduped.append(t)
+        if deduped:
+            return f"{base}. Genres: {', '.join(deduped)}."
         return base
 
     def recommend_playlists(self, track: TrackInput, n: int) -> list[PlaylistRecommendation]:
@@ -127,12 +183,46 @@ class MatcherService:
         # Spotify-provided artist genres are authoritative; map them through
         # the explicit normalizer (which handles compound labels like
         # "west coast hip hop", "neo soul", "drum and bass") and merge in.
+        spotify_track_tags: set[str] = set()
         if track.artist_genres:
-            track_tags |= normalize_external_labels(track.artist_genres)
+            spotify_track_tags = normalize_external_labels(track.artist_genres)
+            track_tags |= spotify_track_tags
+        # User-supplied Xano-style track genres/subgenres (the same vocabulary
+        # the curators use on playlists). These are the most authoritative
+        # source when present, since the user is hand-classifying.
+        user_explicit_track_tags: set[str] = set()
+        if track.genres or track.subgenres:
+            user_explicit_track_tags = normalize_xano_labels(
+                track.genres, track.subgenres
+            )
+            track_tags |= user_explicit_track_tags
+
+        # The "authoritative" tag set used by the strict positive-overlap
+        # filter. Excludes tag_text(...) on artist/title because that often
+        # picks up false positives from track names ("Country Song" by a
+        # non-country artist). Includes Spotify artist_genres because those
+        # are externally curated.
+        authoritative_track_tags = user_explicit_track_tags | spotify_track_tags
+        explicit_filter_active = (
+            self.hard_genre_filter and bool(user_explicit_track_tags)
+        )
+
+        # Normalize user-supplied soft attributes (mood/language/etc.) once.
+        # Empty-set sentinels mean "no preference"; they bypass the penalty.
+        track_soft = {
+            "activities": normalize_attribute_labels(track.activities),
+            "countries": normalize_attribute_labels(track.countries),
+            "languages": normalize_attribute_labels(track.languages),
+            "tempos": normalize_attribute_labels(track.tempos),
+            "moods": normalize_attribute_labels(track.moods),
+        }
+        soft_summary = {k: sorted(v) for k, v in track_soft.items() if v}
         print(
             f"[Recommend] Scoring track='{track.track_name}' artist='{track.artist}' "
             f"popularity={track.popularity} "
-            f"tags={sorted(track_tags) if track_tags else '[]'} n={n}"
+            f"tags={sorted(track_tags) if track_tags else '[]'} "
+            f"soft={soft_summary if soft_summary else '{}'} "
+            f"n={n}"
         )
 
         track_emb = self.text_embedder.encode([text])[0].astype(np.float32)
@@ -180,9 +270,38 @@ class MatcherService:
         probs = self.model.predict_proba(X)[:, 1]
         feats["acceptance_probability"] = probs
 
-        if self.hard_genre_filter:
+        if explicit_filter_active:
+            multipliers, counts = self._explicit_overlap_multipliers(
+                feats, authoritative_track_tags
+            )
+            feats["acceptance_probability"] *= multipliers
+            print(
+                "[Recommend] Explicit-genre filter applied "
+                f"(track_tags={sorted(authoritative_track_tags)} "
+                f"no_match={self.explicit_genre_no_match_penalty:.2f} "
+                f"subgenre_only={self.explicit_genre_subgenre_only_penalty:.2f} "
+                f"untagged={self.explicit_genre_untagged_penalty:.2f} "
+                f"broadtag_threshold={self.explicit_genre_broadtag_threshold}): "
+                f"primary_overlap={counts['primary_overlap']} "
+                f"subgenre_only={counts['subgenre_only']} "
+                f"no_overlap={counts['no_overlap']} "
+                f"untagged_count={counts['untagged']} "
+                f"broadtag_penalized={counts['broadtag_penalized']}"
+            )
+        elif self.hard_genre_filter:
             mask = self._genre_filter_mask(feats, track_tags)
             feats.loc[mask, "acceptance_probability"] *= 0.05
+
+        if any(track_soft.values()) and self.soft_attribute_penalty < 1.0:
+            multipliers, total_conflicts = self._soft_attribute_multipliers(
+                feats, track_soft
+            )
+            feats["acceptance_probability"] *= multipliers
+            print(
+                f"[Recommend] Soft-attribute penalty applied "
+                f"(per-conflict={self.soft_attribute_penalty:.2f}): "
+                f"total_pair_conflicts={int(total_conflicts)}"
+            )
 
         ranked = feats.sort_values("acceptance_probability", ascending=False).head(n)
         playlist_name_by_id = {
@@ -232,3 +351,106 @@ class MatcherService:
             prof = self.profile_bundle.profiles.get(pid)
             masks.append(False if prof is None else has_conflict(track_tags, prof.tags))
         return pd.Series(masks, index=feats.index)
+
+    def _explicit_overlap_multipliers(
+        self, feats: pd.DataFrame, authoritative_track_tags: set[str]
+    ) -> tuple[pd.Series, dict[str, int]]:
+        """Strict tiered positive-overlap filter with over-tagging guard.
+
+        Active only when the user explicitly supplied track genres/subgenres.
+        For each candidate playlist:
+          1. Tier multiplier:
+             * user tags overlap the playlist's *primary* Xano genres
+               -> 1.0 (genuine genre match)
+             * user tags overlap any playlist tag (subgenre or text-derived)
+               but no primary overlap -> `subgenre_only_penalty` (e.g. 0.4)
+             * playlist has no tags at all -> `untagged_penalty` (e.g. 0.3)
+             * playlist has tags but zero overlap -> `no_match_penalty`
+               (e.g. 0.02 -- effectively dropped)
+          2. Breadth multiplier: if the playlist's primary genre count
+             exceeds `broadtag_threshold`, scale by
+             `threshold / len(primary_tags)`. This kills catch-all
+             playlists where the curator selected every genre on the
+             dropdown.
+        Final = tier * breadth.
+
+        Without (1), a Rock playlist with "Blues Rock" subgenre wins
+        against a real Blues primary playlist on `semantic_similarity`.
+        Without (2), a "tag-everything" lo-fi/chillhop playlist matches
+        every track because the curator selected all 24 primary genres.
+        """
+        n = len(feats)
+        multipliers = np.ones(n, dtype=np.float64)
+        counts = {
+            "primary_overlap": 0,
+            "subgenre_only": 0,
+            "no_overlap": 0,
+            "untagged": 0,
+            "broadtag_penalized": 0,
+        }
+        if not authoritative_track_tags:
+            return pd.Series(multipliers, index=feats.index), counts
+
+        threshold = self.explicit_genre_broadtag_threshold
+        playlist_ids = feats["playlist_id"].astype(str).tolist()
+        for i, pid in enumerate(playlist_ids):
+            prof = self.profile_bundle.profiles.get(pid)
+            if prof is None or not prof.tags:
+                multipliers[i] = self.explicit_genre_untagged_penalty
+                counts["untagged"] += 1
+                continue
+            primary = prof.primary_tags
+            if primary and (authoritative_track_tags & primary):
+                tier_mult = 1.0
+                counts["primary_overlap"] += 1
+            elif authoritative_track_tags & prof.tags:
+                tier_mult = self.explicit_genre_subgenre_only_penalty
+                counts["subgenre_only"] += 1
+            else:
+                tier_mult = self.explicit_genre_no_match_penalty
+                counts["no_overlap"] += 1
+            # Over-tagging penalty (curator selected too many primary genres).
+            breadth = len(primary) if primary else len(prof.tags)
+            if breadth > threshold:
+                breadth_mult = float(threshold) / float(breadth)
+                counts["broadtag_penalized"] += 1
+            else:
+                breadth_mult = 1.0
+            multipliers[i] = tier_mult * breadth_mult
+        return pd.Series(multipliers, index=feats.index), counts
+
+    def _soft_attribute_multipliers(
+        self, feats: pd.DataFrame, track_soft: dict[str, set[str]]
+    ) -> tuple[pd.Series, int]:
+        """Return per-row score multipliers from the soft-attribute penalty.
+
+        For each candidate playlist, count attributes where:
+          * the user provided a non-empty track-side set, AND
+          * the playlist has a non-empty curator-set, AND
+          * those two sets are disjoint (no overlap).
+        Each such attribute multiplies the candidate's score by
+        ``self.soft_attribute_penalty``. Equivalent to
+        ``penalty ** num_conflicts``.
+
+        Returns the multiplier series and the total conflict count across
+        all rows (logged for diagnostics).
+        """
+        active_attrs = [
+            (name, values) for name, values in track_soft.items() if values
+        ]
+        if not active_attrs:
+            return pd.Series(1.0, index=feats.index), 0
+
+        conflicts = np.zeros(len(feats), dtype=np.int32)
+        playlist_ids = feats["playlist_id"].astype(str).tolist()
+        for i, pid in enumerate(playlist_ids):
+            prof = self.profile_bundle.profiles.get(pid)
+            if prof is None:
+                continue
+            pl_attrs = prof.soft_attribute_sets()
+            for name, track_values in active_attrs:
+                pl_values = pl_attrs.get(name, set())
+                if pl_values and not (track_values & pl_values):
+                    conflicts[i] += 1
+        multipliers = np.power(self.soft_attribute_penalty, conflicts)
+        return pd.Series(multipliers, index=feats.index), int(conflicts.sum())

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -69,6 +69,40 @@ async def _download_tracks_parallel(
 
 def _analyze_audio_worker(audio_path: Path) -> dict | None:
     return analyze_audio(audio_path)
+
+
+def _analyze_with_progress(
+    ready_for_analysis: list[tuple[dict, Path]],
+    *,
+    workers: int,
+    progress_every: int,
+) -> list[tuple[dict, Path, dict | None]]:
+    """Run process-pool audio analysis with true in-flight progress logs."""
+    results: list[tuple[dict, Path, dict | None]] = []
+    total = len(ready_for_analysis)
+    if total == 0:
+        return results
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        future_to_item = {
+            executor.submit(_analyze_audio_worker, audio_path): (track, audio_path)
+            for track, audio_path in ready_for_analysis
+        }
+        processed = 0
+        for future in as_completed(future_to_item):
+            processed += 1
+            track, audio_path = future_to_item[future]
+            try:
+                features = future.result()
+            except Exception:
+                features = None
+            results.append((track, audio_path, features))
+            if processed % progress_every == 0 or processed == total:
+                print(
+                    f"[Features] Analysis {processed}/{total} "
+                    f"completed={len(results)}"
+                )
+    return results
 
 
 async def build_track_feature_export(
@@ -189,29 +223,22 @@ async def build_track_feature_export(
         f"[Features] Starting parallel audio analysis for {len(ready_for_analysis)} tracks "
         f"(workers={workers})."
     )
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        paths = [audio_path for _, audio_path in ready_for_analysis]
-        features_by_path = await asyncio.to_thread(
-            lambda: list(executor.map(_analyze_audio_worker, paths))
-        )
-        analyzed_count = 0
-        for idx, ((track, audio_path), features) in enumerate(
-            zip(ready_for_analysis, features_by_path, strict=False), 1
-        ):
-            if not features:
-                if idx % progress_every == 0 or idx == len(ready_for_analysis):
-                    print(
-                        f"[Features] Analysis {idx}/{len(ready_for_analysis)} "
-                        "(analysis failed; skipped)"
-                    )
-                continue
-            analyzed_rows.append({**track, **features, "audio_path": str(audio_path)})
-            analyzed_count += 1
-            if idx % progress_every == 0 or idx == len(ready_for_analysis):
-                print(
-                    f"[Features] Analysis {idx}/{len(ready_for_analysis)} "
-                    f"analyzed_rows={len(analyzed_rows)} new={analyzed_count}"
-                )
+    analyzed_items = await asyncio.to_thread(
+        _analyze_with_progress,
+        ready_for_analysis,
+        workers=workers,
+        progress_every=progress_every,
+    )
+    analyzed_count = 0
+    for track, audio_path, features in analyzed_items:
+        if not features:
+            continue
+        analyzed_rows.append({**track, **features, "audio_path": str(audio_path)})
+        analyzed_count += 1
+    print(
+        f"[Features] Analysis finished total={len(ready_for_analysis)} "
+        f"succeeded={analyzed_count} failed={len(ready_for_analysis) - analyzed_count}"
+    )
 
     df = pd.DataFrame(analyzed_rows)
     if "track_id" in df.columns:
