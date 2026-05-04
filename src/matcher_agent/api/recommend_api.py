@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from matcher_agent.clients.spotify_client import parse_playlist_id
 from matcher_agent.config import get_settings
 from matcher_agent.data.repository import DataRepository
+from matcher_agent.models import coerce_playlist_tier, parse_track_tier
 from matcher_agent.storage.parquet_store import ParquetStore
 
 
@@ -45,6 +46,7 @@ def _run_recommend_cli(
     tracks_csv: str,
     no_genre_filter: bool,
     track_attributes: dict[str, list[str]],
+    track_tier: int | None = None,
 ) -> list[dict]:
     cmd = [
         sys.executable,
@@ -59,6 +61,8 @@ def _run_recommend_cli(
     ]
     if no_genre_filter:
         cmd.append("--no-genre-filter")
+    if track_tier is not None:
+        cmd.extend(["--track-tier", str(track_tier)])
     for query_name, values in track_attributes.items():
         flag = _TRACK_ATTR_QUERY_TO_FLAG.get(query_name)
         if not flag:
@@ -98,7 +102,7 @@ def _run_recommend_cli(
 
 
 @lru_cache(maxsize=1)
-def _playlist_spotify_meta() -> dict[str, dict[str, str | None]]:
+def _playlist_spotify_meta() -> dict[str, dict[str, str | int | None]]:
     """Map internal playlist_id -> spotify identifiers/urls from local parquet."""
     settings = get_settings()
     repo = DataRepository(ParquetStore(settings.data_dir))
@@ -121,6 +125,7 @@ def _playlist_spotify_meta() -> dict[str, dict[str, str | None]]:
         out[pid] = {
             "spotify_playlist_id": spotify_id,
             "spotify_playlist_url": playlist_url,
+            "tier": coerce_playlist_tier(row.get("tier")),
         }
     return out
 
@@ -132,7 +137,7 @@ def _enrich_recommendations_with_spotify_meta(recs: list[dict]) -> list[dict]:
         pid = str(rec.get("playlist_id") or "")
         meta = meta_by_id.get(
             pid,
-            {"spotify_playlist_id": None, "spotify_playlist_url": None},
+            {"spotify_playlist_id": None, "spotify_playlist_url": None, "tier": None},
         )
         merged = dict(rec)
         merged.update(meta)
@@ -172,6 +177,18 @@ class RecommendHandler(BaseHTTPRequestHandler):
             "True",
         }
         tracks_csv = (query.get("tracks_csv") or ["output/training_data.csv"])[0]
+        # Optional: strict tier match (1–4). Repeatable N/A — single scalar.
+        track_tier_raw = (query.get("track_tier") or [None])[0]
+        track_tier: int | None = None
+        if track_tier_raw is not None and str(track_tier_raw).strip():
+            try:
+                track_tier = parse_track_tier(str(track_tier_raw).strip())
+            except ValueError:
+                self._write_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "Query param 'track_tier' must be an integer 1, 2, 3, or 4."},
+                )
+                return
         # Optional repeatable track-attribute query params:
         #   /recommend?...&track_genre=Pop&track_genre=Rock&track_mood=energetic
         track_attributes: dict[str, list[str]] = {
@@ -199,6 +216,7 @@ class RecommendHandler(BaseHTTPRequestHandler):
                 tracks_csv=tracks_csv,
                 no_genre_filter=no_genre_filter,
                 track_attributes=track_attributes,
+                track_tier=track_tier,
             )
             recs = _enrich_recommendations_with_spotify_meta(recs)
         except Exception as exc:
@@ -210,6 +228,7 @@ class RecommendHandler(BaseHTTPRequestHandler):
             {
                 "spotify_track_id": spotify_track_id,
                 "n": n,
+                "track_tier": track_tier,
                 "count": len(recs),
                 "track_attributes": {k: v for k, v in track_attributes.items() if v},
                 "results": recs,
@@ -231,7 +250,8 @@ def main() -> None:
     print(f"[RecommendAPI] Listening on http://{args.host}:{args.port}")
     print("[RecommendAPI] GET /recommend?spotify_track_id=<id>&n=<int>")
     print(
-        "[RecommendAPI]   Optional (repeatable): track_genre, track_subgenre, "
+        "[RecommendAPI]   Optional: track_tier=1|2|3|4 (strict match to playlist tier). "
+        "Repeatable: track_genre, track_subgenre, "
         "track_mood, track_activity, track_language, track_country, track_tempo"
     )
     print("[RecommendAPI] GET /health")

@@ -25,7 +25,7 @@ from matcher_agent.features.playlist_profiles import (
     build_track_popularity_lookup,
     build_track_text_strings,
 )
-from matcher_agent.models import PlaylistRecommendation, TrackInput
+from matcher_agent.models import PlaylistRecommendation, TrackInput, parse_track_tier
 
 
 class MatcherService:
@@ -227,9 +227,11 @@ class MatcherService:
             "moods": normalize_attribute_labels(track.moods),
         }
         soft_summary = {k: sorted(v) for k, v in track_soft.items() if v}
+        track_tier = parse_track_tier(track.tier)
         print(
             f"[Recommend] Scoring track='{track.track_name}' artist='{track.artist}' "
             f"popularity={track.popularity} "
+            f"tier={track_tier} "
             f"tags={sorted(track_tags) if track_tags else '[]'} "
             f"soft={soft_summary if soft_summary else '{}'} "
             f"n={n}"
@@ -263,6 +265,21 @@ class MatcherService:
             popularity_lookup[track_id] = float(track.popularity)
 
         playlist_ids = list(self.profile_bundle.profiles.keys())
+        if track_tier is not None:
+            n_before = len(playlist_ids)
+            playlist_ids = [
+                pid
+                for pid in playlist_ids
+                if self.profile_bundle.profiles[pid].tier == track_tier
+            ]
+            print(
+                f"[Recommend] Tier filter active (track_tier={track_tier}): "
+                f"candidates {n_before} -> {len(playlist_ids)}"
+            )
+            if not playlist_ids:
+                print("[Recommend] No playlists match track tier; returning [].")
+                return []
+
         pair_input = pd.DataFrame(
             {"track_id": [track_id] * len(playlist_ids), "playlist_id": playlist_ids}
         )

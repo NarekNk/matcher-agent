@@ -72,6 +72,13 @@ def main() -> None:
         default=[],
         help="Track tempo descriptor (repeatable).",
     )
+    parser.add_argument(
+        "--track-tier",
+        type=int,
+        choices=[1, 2, 3, 4],
+        default=None,
+        help="Campaign/playlist tier (1–4). When set, only playlists with the same tier are candidates.",
+    )
     args = parser.parse_args()
 
     print("[RecommendCLI] Starting recommendation request.")
@@ -152,6 +159,7 @@ def main() -> None:
             languages=args.track_language,
             countries=args.track_country,
             tempos=args.track_tempo,
+            tier=args.track_tier,
             extra=extra_features,
         ),
         n=args.n,

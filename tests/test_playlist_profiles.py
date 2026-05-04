@@ -108,6 +108,37 @@ def test_build_profiles_uses_xano_genres_and_subgenres() -> None:
     assert "chill_lofi" in prof.tags
 
 
+def test_build_profiles_sets_playlist_tier() -> None:
+    playlists = pd.DataFrame(
+        [
+            {
+                "playlist_id": "p1",
+                "playlist_name": "Mix",
+                "description": "",
+                "tier": 3,
+            },
+            {
+                "playlist_id": "p2",
+                "playlist_name": "Other",
+                "description": "",
+                "tier": 99,
+            },
+        ]
+    )
+    matches = pd.DataFrame(columns=["playlist_id", "track_id", "label"])
+    tracks = pd.DataFrame(columns=["track_id", "artist", "track_name"])
+
+    bundle = build_profiles(
+        playlists,
+        matches,
+        tracks,
+        track_text_emb_by_id={},
+        playlist_text_emb_by_id={"p1": _emb(1.0, 0.0), "p2": _emb(0.0, 1.0)},
+    )
+    assert bundle.profiles["p1"].tier == 3
+    assert bundle.profiles["p2"].tier is None
+
+
 def test_build_profiles_separates_primary_tags_from_subgenre_tags() -> None:
     """`primary_tags` must hold canonical tags coming exclusively from the
     Xano top-level `genres` array. `tags` is the union of primary + subgenre

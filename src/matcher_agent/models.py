@@ -1,7 +1,61 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
+
+# Playlist / campaign tiers from Xano (1 = most selective; 4 = broadest).
+TRACK_TIER_MIN = 1
+TRACK_TIER_MAX = 4
+
+
+def parse_track_tier(value: int | str | None) -> int | None:
+    """Parse a request-time track tier: ``None`` if missing; 1–4 otherwise.
+
+    Raises ``ValueError`` if a non-empty value is not a valid tier.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = int(text, 10)
+        except ValueError as exc:
+            raise ValueError(
+                f"track tier must be an integer {TRACK_TIER_MIN}-{TRACK_TIER_MAX}, got {value!r}"
+            ) from exc
+    t = int(value)
+    if t < TRACK_TIER_MIN or t > TRACK_TIER_MAX:
+        raise ValueError(
+            f"track tier must be in {TRACK_TIER_MIN}-{TRACK_TIER_MAX}, got {t}"
+        )
+    return t
+
+
+def coerce_playlist_tier(value: Any) -> int | None:
+    """Normalize a playlist ``tier`` cell from Xano/parquet to 1–4, or ``None``."""
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() in ("nan", "none"):
+            return None
+        try:
+            t = int(float(text))
+        except ValueError:
+            return None
+    else:
+        try:
+            t = int(value)
+        except (TypeError, ValueError):
+            return None
+    if TRACK_TIER_MIN <= t <= TRACK_TIER_MAX:
+        return t
+    return None
 
 
 @dataclass
@@ -34,6 +88,9 @@ class TrackInput:
     languages: list[str] = field(default_factory=list)
     tempos: list[str] = field(default_factory=list)
     moods: list[str] = field(default_factory=list)
+    # When set (1–4), only playlists with the same tier are candidates.
+    # Not a model feature; enforced in ``MatcherService.recommend_playlists``.
+    tier: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

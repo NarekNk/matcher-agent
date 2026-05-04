@@ -566,3 +566,55 @@ def test_soft_attribute_penalty_disabled_when_user_inputs_empty(tmp_path: Path) 
     # in this dummy model so it's enough to assert their probabilities are
     # equal (no penalty applied).
     assert recs[0].acceptance_probability == recs[1].acceptance_probability
+
+
+def test_track_tier_filters_to_matching_playlists_only(tmp_path: Path) -> None:
+    pipe = _make_dummy_pipeline(PAIRWISE_FEATURE_COLS)
+    save_bundle({"model": pipe, "feature_columns": PAIRWISE_FEATURE_COLS}, tmp_path)
+
+    historical = pd.DataFrame(columns=["track_id", "playlist_id", "label", "track_name", "artist"])
+    playlists = pd.DataFrame(
+        [
+            {
+                "playlist_id": "p_t1",
+                "playlist_name": "Hip-Hop A",
+                "description": "trap rap",
+                "tier": 1,
+            },
+            {
+                "playlist_id": "p_t2",
+                "playlist_name": "Hip-Hop B",
+                "description": "trap rap",
+                "tier": 2,
+            },
+        ]
+    )
+    tracks = pd.DataFrame(columns=["track_id", "track_name", "artist", "bpm"])
+
+    service = MatcherService(
+        artifact_dir=str(tmp_path),
+        historical_df=historical,
+        playlists_df=playlists,
+        tracks_df=tracks,
+        text_embedder=_StubEmbedder(),
+        hard_genre_filter=False,
+    )
+    recs = service.recommend_playlists(
+        TrackInput(track_id="t1", track_name="Trap Banger", artist="Newcomer", tier=1),
+        n=5,
+    )
+    assert len(recs) == 1
+    assert recs[0].playlist_id == "p_t1"
+
+
+def test_models_parse_track_tier() -> None:
+    from matcher_agent.models import parse_track_tier
+
+    assert parse_track_tier(None) is None
+    assert parse_track_tier(3) == 3
+    assert parse_track_tier("2") == 2
+
+    with pytest.raises(ValueError):
+        parse_track_tier(0)
+    with pytest.raises(ValueError):
+        parse_track_tier(5)

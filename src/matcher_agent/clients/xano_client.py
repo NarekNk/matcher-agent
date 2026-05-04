@@ -6,6 +6,8 @@ from typing import Any
 
 import requests
 
+from matcher_agent.models import coerce_playlist_tier
+
 
 @dataclass
 class XanoClient:
@@ -132,6 +134,8 @@ class XanoClient:
                     "languages": self._as_str_list(row.get("languages")),
                     "tempos": self._as_str_list(row.get("tempos")),
                     "moods": self._as_str_list(row.get("moods")),
+                    # 1–4 from Xano; missing/invalid -> None (stored as null in parquet).
+                    "tier": coerce_playlist_tier(row.get("tier")),
                 }
             )
         print(f"[Xano:playlists] normalized_rows={len(normalized)}")

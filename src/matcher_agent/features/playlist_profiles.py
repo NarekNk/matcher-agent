@@ -11,6 +11,7 @@ from matcher_agent.features.attribute_normalizer import (
 )
 from matcher_agent.features.genre_normalizer import normalize_xano_labels
 from matcher_agent.features.genre_tagger import tag_text
+from matcher_agent.models import coerce_playlist_tier
 
 # Audio columns used to build per-playlist accepted-track centroids. Kept small
 # and meaningful so missing audio for some tracks doesn't dominate noise.
@@ -128,6 +129,8 @@ class PlaylistProfile:
     languages: set[str] = field(default_factory=set)
     tempos: set[str] = field(default_factory=set)
     moods: set[str] = field(default_factory=set)
+    # Xano playlist tier 1–4; ``None`` if missing or invalid in source data.
+    tier: int | None = None
 
     def soft_attribute_sets(self) -> dict[str, set[str]]:
         """Return the soft-attribute sets keyed by canonical name."""
@@ -382,6 +385,7 @@ def build_profiles(
             languages=soft_attrs["languages"],
             tempos=soft_attrs["tempos"],
             moods=soft_attrs["moods"],
+            tier=coerce_playlist_tier(row.get("tier")),
         )
 
     soft_attr_summary = " ".join(
