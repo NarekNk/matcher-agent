@@ -45,6 +45,13 @@ class Settings:
     # ~30% drop per conflicting attribute, capping at ~0.17 with all 5 in
     # disagreement -- a noticeable but not fatal reweighting.
     soft_attribute_penalty: float = float(os.getenv("SOFT_ATTRIBUTE_PENALTY", "0.7"))
+    # Stricter multiplier used only for `languages` mismatches (e.g. English
+    # track vs Portuguese-tagged playlist). Same semantics as
+    # `soft_attribute_penalty`: applied once per language conflict when both
+    # sides have non-empty normalized language sets and they do not overlap.
+    language_mismatch_penalty: float = float(
+        os.getenv("LANGUAGE_MISMATCH_PENALTY", "0.3")
+    )
     # When the user explicitly supplies track genres/subgenres, we switch
     # to a strict positive-overlap filter:
     #   * playlists whose Xano tags do not share any tag with the supplied

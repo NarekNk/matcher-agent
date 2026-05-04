@@ -128,6 +128,7 @@ def main() -> None:
         semantic_blend=settings.semantic_blend,
         hard_genre_filter=not args.no_genre_filter and settings.hard_genre_filter,
         soft_attribute_penalty=settings.soft_attribute_penalty,
+        language_mismatch_penalty=settings.language_mismatch_penalty,
         explicit_genre_no_match_penalty=settings.explicit_genre_no_match_penalty,
         explicit_genre_untagged_penalty=settings.explicit_genre_untagged_penalty,
         explicit_genre_subgenre_only_penalty=settings.explicit_genre_subgenre_only_penalty,

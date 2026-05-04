@@ -157,6 +157,58 @@ def test_soft_attribute_penalty_demotes_conflicting_playlist(tmp_path: Path) -> 
     assert biased[0].acceptance_probability > biased[1].acceptance_probability
 
 
+def test_language_mismatch_penalty_demotes_wrong_language_playlist(tmp_path: Path) -> None:
+    """Playlists tagged with a different language than the track should rank
+    below same-genre playlists tagged with a matching language when the user
+    supplies `--track-language`."""
+    pipe = _make_dummy_pipeline(PAIRWISE_FEATURE_COLS)
+    save_bundle({"model": pipe, "feature_columns": PAIRWISE_FEATURE_COLS}, tmp_path)
+
+    historical = pd.DataFrame(columns=["track_id", "playlist_id", "label", "track_name", "artist"])
+    playlists = pd.DataFrame(
+        [
+            {
+                "playlist_id": "p_en",
+                "playlist_name": "Playlist EN",
+                # Same description on both rows so semantic features tie; only
+                # language tags differ.
+                "description": "rap drill hip hop",
+                "languages": ["english"],
+            },
+            {
+                "playlist_id": "p_pt",
+                "playlist_name": "Playlist PT",
+                "description": "rap drill hip hop",
+                "languages": ["portuguese"],
+            },
+        ]
+    )
+    tracks = pd.DataFrame(columns=["track_id", "track_name", "artist", "bpm"])
+
+    service = MatcherService(
+        artifact_dir=str(tmp_path),
+        historical_df=historical,
+        playlists_df=playlists,
+        tracks_df=tracks,
+        text_embedder=_StubEmbedder(),
+        hard_genre_filter=False,
+        soft_attribute_penalty=1.0,
+        language_mismatch_penalty=0.05,
+    )
+    recs = service.recommend_playlists(
+        TrackInput(
+            track_id="t1",
+            track_name="Trap",
+            artist="MC",
+            languages=["english"],
+        ),
+        n=2,
+    )
+    assert recs[0].playlist_id == "p_en"
+    assert recs[1].playlist_id == "p_pt"
+    assert recs[0].acceptance_probability > recs[1].acceptance_probability
+
+
 def test_track_text_includes_user_supplied_genres_in_embedding(tmp_path: Path) -> None:
     """Fix A: user-supplied genres/subgenres must reach the embedded track
     text so semantic_similarity (the dominant feature) becomes genre-aware
@@ -216,6 +268,17 @@ def test_track_text_includes_user_supplied_genres_in_embedding(tmp_path: Path) -
     assert "singer-songwriter" in lowered_c
     assert "blues" in lowered_c
     assert "soul" in lowered_c
+
+    text_lang = service._track_text_for_input(
+        TrackInput(
+            track_id="t1",
+            track_name="Gunpowder",
+            artist="Sarah Dunn Music",
+            languages=["English"],
+        )
+    )
+    assert "language:" in text_lang.lower()
+    assert "english" in text_lang.lower()
 
 
 def test_explicit_genre_filter_drops_non_overlapping_playlists(tmp_path: Path) -> None:

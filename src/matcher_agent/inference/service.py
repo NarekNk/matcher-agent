@@ -43,6 +43,7 @@ class MatcherService:
         semantic_blend: float = 0.5,
         hard_genre_filter: bool = True,
         soft_attribute_penalty: float = 0.7,
+        language_mismatch_penalty: float = 0.3,
         explicit_genre_no_match_penalty: float = 0.02,
         explicit_genre_untagged_penalty: float = 0.3,
         explicit_genre_subgenre_only_penalty: float = 0.4,
@@ -56,6 +57,9 @@ class MatcherService:
         self.hard_genre_filter = hard_genre_filter
         # Clamp into (0, 1]; 1.0 disables soft penalties.
         self.soft_attribute_penalty = max(1e-6, min(1.0, float(soft_attribute_penalty)))
+        self.language_mismatch_penalty = max(
+            1e-6, min(1.0, float(language_mismatch_penalty))
+        )
         # When the user explicitly supplies track genres/subgenres we switch
         # from "conflict avoidance" to a stricter "positive overlap required"
         # filter. These two knobs control that behavior:
@@ -172,8 +176,14 @@ class MatcherService:
             if t and t not in seen:
                 seen.add(t)
                 deduped.append(t)
+        suffix_parts: list[str] = []
         if deduped:
-            return f"{base}. Genres: {', '.join(deduped)}."
+            suffix_parts.append(f"Genres: {', '.join(deduped)}.")
+        lang_labels = normalize_attribute_labels(track.languages)
+        if lang_labels:
+            suffix_parts.append(f"Language: {', '.join(sorted(lang_labels))}.")
+        if suffix_parts:
+            return f"{base}. " + " ".join(suffix_parts)
         return base
 
     def recommend_playlists(self, track: TrackInput, n: int) -> list[PlaylistRecommendation]:
@@ -292,14 +302,18 @@ class MatcherService:
             mask = self._genre_filter_mask(feats, track_tags)
             feats.loc[mask, "acceptance_probability"] *= 0.05
 
-        if any(track_soft.values()) and self.soft_attribute_penalty < 1.0:
+        soft_penalties_on = self.soft_attribute_penalty < 1.0 or (
+            bool(track_soft.get("languages")) and self.language_mismatch_penalty < 1.0
+        )
+        if any(track_soft.values()) and soft_penalties_on:
             multipliers, total_conflicts = self._soft_attribute_multipliers(
                 feats, track_soft
             )
             feats["acceptance_probability"] *= multipliers
             print(
                 f"[Recommend] Soft-attribute penalty applied "
-                f"(per-conflict={self.soft_attribute_penalty:.2f}): "
+                f"(per-conflict={self.soft_attribute_penalty:.2f} "
+                f"language_mismatch={self.language_mismatch_penalty:.2f}): "
                 f"total_pair_conflicts={int(total_conflicts)}"
             )
 
@@ -428,9 +442,10 @@ class MatcherService:
           * the user provided a non-empty track-side set, AND
           * the playlist has a non-empty curator-set, AND
           * those two sets are disjoint (no overlap).
-        Each such attribute multiplies the candidate's score by
-        ``self.soft_attribute_penalty``. Equivalent to
-        ``penalty ** num_conflicts``.
+        Language mismatches use ``self.language_mismatch_penalty`` (typically
+        stricter than ``self.soft_attribute_penalty``). Other soft attributes
+        use ``self.soft_attribute_penalty``. Per-row multiplier is the product
+        of the applicable penalties for each conflicting attribute.
 
         Returns the multiplier series and the total conflict count across
         all rows (logged for diagnostics).
@@ -442,15 +457,21 @@ class MatcherService:
             return pd.Series(1.0, index=feats.index), 0
 
         conflicts = np.zeros(len(feats), dtype=np.int32)
+        multipliers_arr = np.ones(len(feats), dtype=np.float64)
         playlist_ids = feats["playlist_id"].astype(str).tolist()
         for i, pid in enumerate(playlist_ids):
             prof = self.profile_bundle.profiles.get(pid)
             if prof is None:
                 continue
             pl_attrs = prof.soft_attribute_sets()
+            m = 1.0
             for name, track_values in active_attrs:
                 pl_values = pl_attrs.get(name, set())
                 if pl_values and not (track_values & pl_values):
                     conflicts[i] += 1
-        multipliers = np.power(self.soft_attribute_penalty, conflicts)
-        return pd.Series(multipliers, index=feats.index), int(conflicts.sum())
+                    if name == "languages":
+                        m *= self.language_mismatch_penalty
+                    else:
+                        m *= self.soft_attribute_penalty
+            multipliers_arr[i] = m
+        return pd.Series(multipliers_arr, index=feats.index), int(conflicts.sum())
