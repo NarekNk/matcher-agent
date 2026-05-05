@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 _ES_IMPORT_ERROR: Exception | None = None
 try:
@@ -17,7 +14,7 @@ except Exception as exc:  # pragma: no cover - optional dependency for tests
 
 def analyze_audio(audio_path: Path) -> dict | None:
     if es is None:
-        logger.warning(
+        print(
             "Audio analysis skipped: essentia is not available (%s)",
             repr(_ES_IMPORT_ERROR) if _ES_IMPORT_ERROR else "import failed",
         )
@@ -48,7 +45,7 @@ def analyze_audio(audio_path: Path) -> dict | None:
             _, mfcc_frame = mfcc_algo(spec)
             mfccs.append(mfcc_frame)
         if not mfccs:
-            logger.warning(
+            print(
                 "Audio analysis produced no MFCC frames (empty or too short audio): %s",
                 audio_path,
             )
@@ -73,5 +70,5 @@ def analyze_audio(audio_path: Path) -> dict | None:
             features[f"mfcc_{i+1}"] = float(val)
         return features
     except Exception:
-        logger.exception("Audio analysis failed for %s", audio_path)
+        print("Audio analysis failed for %s", audio_path)
         return None
