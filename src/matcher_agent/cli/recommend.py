@@ -113,10 +113,21 @@ def main() -> None:
     else:
         print("[RecommendCLI] No preview URL available; scoring without audio features.")
 
+    print(f"[RecommendCLI] Initializing data repository from {settings.data_dir}")
     repo = DataRepository(ParquetStore(settings.data_dir))
+    print("[RecommendCLI] Data repository initialized")
+
+    print("[RecommendCLI] Loading historical matches dataframe")
     historical_df, _ = repo.load_labeled_historical_matches()
+    print(f"[RecommendCLI] Historical matches loaded rows={len(historical_df)}")
+
+    print("[RecommendCLI] Loading playlists dataframe")
     playlists_df = repo.load_playlists()
+    print(f"[RecommendCLI] Playlists loaded rows={len(playlists_df)}")
+
+    print(f"[RecommendCLI] Loading tracks dataframe from {args.tracks_csv}")
     tracks_df = repo.load_tracks_from_export(args.tracks_csv)
+    print(f"[RecommendCLI] Tracks loaded rows={len(tracks_df)}")
     print(
         f"[RecommendCLI] Loaded playlists={len(playlists_df)} "
         f"historical_rows={len(historical_df)} tracks={len(tracks_df)}"
