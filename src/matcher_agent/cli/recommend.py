@@ -107,7 +107,7 @@ def main() -> None:
                 extra_features["audio_path"] = str(audio_path)
                 print(f"[RecommendCLI] Audio analysis completed features={len(audio_features)}")
             else:
-                print("[RecommendCLI] Audio analysis failed; scoring without audio features.")
+                print(f"[RecommendCLI] Audio analysis failed for {audio_path}; scoring without audio features.")
         else:
             print("[RecommendCLI] Preview download failed; scoring without audio features.")
     else:
