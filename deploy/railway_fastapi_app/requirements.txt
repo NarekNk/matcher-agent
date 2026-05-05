@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30.0
 supabase>=2.5.0
 pandas>=2.2.0
 pyarrow>=16.0.0
+essentia>=2.1b6.dev1110
