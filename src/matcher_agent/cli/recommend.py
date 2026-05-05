@@ -100,6 +100,7 @@ def main() -> None:
     if preview_url:
         audio_path = download_preview(resolved["track_id"], preview_url, settings.audio_dir)
         if audio_path:
+            print(f"[RecommendCLI] Analyzing audio file {audio_path}")
             audio_features = analyze_audio(audio_path)
             if audio_features:
                 extra_features.update(audio_features)
