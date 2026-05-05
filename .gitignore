@@ -25,6 +25,8 @@ venv/
 
 # Generated artifacts and outputs
 artifacts/
+!src/matcher_agent/artifacts/
+!src/matcher_agent/artifacts/*.py
 output/
 audio_previews/
 audio_previews_bench_*/
