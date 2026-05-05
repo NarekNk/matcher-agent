@@ -1,3 +1,21 @@
+Metadata-Version: 2.4
+Name: matcher-agent
+Version: 0.1.0
+Summary: Track to playlist matching agent
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: matplotlib>=3.8.0
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: pandas>=2.2.0
+Requires-Dist: pyarrow>=16.0.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: scikit-learn>=1.4.0
+Requires-Dist: sentence-transformers>=2.7.0
+Requires-Dist: spotipy>=2.24.0
+Requires-Dist: supabase>=2.5.0
+
 # Track → Playlist Matcher Agent
 
 Given a Spotify track and an integer `n`, this agent returns the top-`n` playlists from your Xano catalog that are most likely to **accept** the track when pitched to a curator.
