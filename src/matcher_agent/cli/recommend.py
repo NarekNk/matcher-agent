@@ -114,7 +114,6 @@ def main() -> None:
         print("[RecommendCLI] No preview URL available; scoring without audio features.")
 
     print(f"[RecommendCLI] Initializing data repository from {settings.data_dir}")
-    print(f"[RecommendCLI] Initializing data repository from {settings.data_dir}")
     repo = DataRepository(ParquetStore(settings.data_dir))
     print("[RecommendCLI] Data repository initialized")
 
