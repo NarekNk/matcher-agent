@@ -14,7 +14,7 @@ class XanoClient:
     playlists_url: str
     historical_matches_url: str
     timeout_s: float = 20.0
-    page_size: int = 200
+    page_size: int = 1000
     historical_max_pages: int | None = None
 
     @staticmethod

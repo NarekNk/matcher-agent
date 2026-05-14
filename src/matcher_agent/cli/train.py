@@ -35,7 +35,7 @@ def main() -> None:
         type=float,
         default=None,
         help="Fraction of negatives that are genre-conflicting. "
-        "Defaults to NEGATIVE_CONFLICT_FRACTION env var (0.33).",
+        "Defaults to NEGATIVE_CONFLICT_FRACTION env var (0.5).",
     )
     parser.add_argument(
         "--near-miss-fraction",

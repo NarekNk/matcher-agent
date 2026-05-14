@@ -345,7 +345,7 @@ def build_profiles(
     playlist_text_emb_by_id: dict[str, np.ndarray],
     label_col: str = "label",
     audio_feature_cols: tuple[str, ...] = AUDIO_FEATURE_COLS,
-    semantic_blend: float = 0.5,
+    semantic_blend: float = 0.25,
 ) -> ProfileBundle:
     """Compute one PlaylistProfile per playlist in `playlists_df`.
 

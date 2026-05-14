@@ -54,7 +54,7 @@ def build_training_bundle(
     playlists_df: pd.DataFrame,
     *,
     text_embedder: TextEmbedder,
-    semantic_blend: float = 0.5,
+    semantic_blend: float = 0.25,
 ) -> TrainingDataBundle:
     print(
         f"[Dataset] Building bundle | matches={len(matches_df)} "

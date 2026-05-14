@@ -62,7 +62,7 @@ class NegativeSamplingConfig:
     """
 
     ratio: float = 5.0
-    conflict_fraction: float = 0.33
+    conflict_fraction: float = 0.5
     near_miss_fraction: float = 0.33
     popularity_stratified: bool = True
     near_miss_top_k: int = 20
@@ -133,10 +133,10 @@ def train_ranker(
     output_dir: Path,
     model_dir: Path,
     random_state: int = 42,
-    semantic_blend: float = 0.5,
+    semantic_blend: float = 0.25,
     test_size: float = 0.2,
     full_catalog_eval: bool = True,
-    negative_sample_ratio: float = 3.0,
+    negative_sample_ratio: float = 5.0,
     negative_conflict_fraction: float = 0.5,
     sampling_config: NegativeSamplingConfig | None = None,
 ) -> RankerTrainResult:

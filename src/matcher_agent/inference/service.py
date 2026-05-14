@@ -42,14 +42,14 @@ class MatcherService:
         tracks_df: pd.DataFrame,
         text_embedder: TextEmbedder,
         *,
-        semantic_blend: float = 0.5,
+        semantic_blend: float = 0.25,
         hard_genre_filter: bool = True,
         soft_attribute_penalty: float = 0.7,
         language_mismatch_penalty: float = 0.3,
         explicit_genre_no_match_penalty: float = 0.02,
         explicit_genre_untagged_penalty: float = 0.3,
         explicit_genre_subgenre_only_penalty: float = 0.4,
-        explicit_genre_broadtag_threshold: int = 6,
+        explicit_genre_broadtag_threshold: int = 4,
     ):
         print(f"[Recommend] Loading model artifacts from {artifact_dir}")
         bundle = load_bundle(Path(artifact_dir))
@@ -395,8 +395,8 @@ class MatcherService:
              exceeds `broadtag_threshold`, apply a **sqrt** decay:
              ``sqrt(threshold / len(primary_tags))``.  This is gentler
              than the previous linear ``threshold / len(...)`` rule —
-             a playlist with 12 primary tags and threshold=6 now gets
-             ``sqrt(6/12)=0.71`` instead of ``6/12=0.50``.  This
+             a playlist with 12 primary tags and threshold=4 now gets
+             ``sqrt(4/12)≈0.58`` instead of ``4/12≈0.33``.  This
              avoids over-penalizing playlists that are legitimately
              multi-genre while still down-weighting "tag-everything"
              catch-all playlists.
