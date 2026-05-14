@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "ai-ml-data-science": {
+      "source": "vasilyu1983/ai-agents-public",
+      "sourceType": "github",
+      "skillPath": "frameworks/shared-skills/skills/ai-ml-data-science/SKILL.md",
+      "computedHash": "7df3e2c22f461c5ba31bd5c9400cedc7c0e91d219c4d331748b56a5955b60ffa"
+    },
+    "scikit-learn": {
+      "source": "jackspace/claudeskillz",
+      "sourceType": "github",
+      "skillPath": "skills/scientific-pkg-scikit-learn/SKILL.md",
+      "computedHash": "a6669e3594347fd054a59f958f6f577a0b1a7df1cfa861e846b0b63d1a5cdc69"
+    },
+    "similarity-search-patterns": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/llm-application-dev/skills/similarity-search-patterns/SKILL.md",
+      "computedHash": "3f057d0714eb6685f95c72046732b368ee1e77f5252d14102c69a4c3b376a475"
+    }
+  }
+}
