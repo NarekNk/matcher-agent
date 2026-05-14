@@ -18,6 +18,7 @@ from matcher_agent.features.playlist_profiles import (
     build_profiles,
     build_track_popularity_lookup,
     build_track_text_strings,
+    ensure_audio_columns,
 )
 
 
@@ -65,8 +66,13 @@ def build_training_bundle(
     matches_df["playlist_id"] = matches_df["playlist_id"].astype("string")
     matches_df = matches_df.dropna(subset=["track_id", "playlist_id", "label"])
 
+    tracks_df = ensure_audio_columns(tracks_df)
     track_meta_columns = [
-        c for c in ("track_id", "track_name", "artist", "album", "popularity", *AUDIO_FEATURE_COLS)
+        c for c in (
+            "track_id", "track_name", "artist", "album", "popularity",
+            "artist_genres", "genres", "subgenres", "languages", "moods",
+            *AUDIO_FEATURE_COLS,
+        )
         if c in tracks_df.columns
     ]
     tracks_df = tracks_df[track_meta_columns].copy()

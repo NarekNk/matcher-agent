@@ -13,6 +13,21 @@ except Exception as exc:  # pragma: no cover - optional dependency for tests
 
 
 def analyze_audio(audio_path: Path) -> dict | None:
+    """Extract audio features from a local audio file using Essentia.
+
+    Returns a flat dict of feature names to float values, or None on
+    failure.  Features include:
+
+    * **Rhythm**: bpm, beats_confidence, onset_rate
+    * **Global**: loudness, danceability, energy
+    * **Key**: key (0-11 semitones from C), mode (0=minor, 1=major)
+    * **Spectral means**: spectral_centroid, spectral_rolloff,
+      spectral_flux, zcr
+    * **Spectral stds** (temporal variation): spectral_centroid_std,
+      spectral_rolloff_std, spectral_flux_std, zcr_std
+    * **MFCCs**: mfcc_1 … mfcc_13 (frame means)
+    * **MFCC stds**: mfcc_1_std … mfcc_13_std (frame std devs)
+    """
     if es is None:
         print(
             "Audio analysis skipped: essentia is not available (%s)",
@@ -55,20 +70,53 @@ def analyze_audio(audio_path: Path) -> dict | None:
         danceability, _ = es.Danceability()(audio)
         energy = es.Energy()(audio)
 
-        features = {
-            "bpm": bpm,
-            "beats_confidence": beats_confidence,
+        # --- Key & mode ---
+        key_extractor = es.KeyExtractor()
+        key_str, scale_str, key_strength = key_extractor(audio)
+        key_int = _key_to_int(key_str)
+        mode_int = 1 if scale_str.lower() == "major" else 0
+
+        # --- Onset rate ---
+        onset_rate_algo = es.OnsetRate()
+        onsets, onset_rate = onset_rate_algo(audio)
+
+        features: dict[str, float] = {
+            "bpm": float(bpm),
+            "beats_confidence": float(beats_confidence),
             "loudness": float(loudness),
             "danceability": float(danceability),
             "energy": float(energy),
+            "key": float(key_int),
+            "mode": float(mode_int),
+            "onset_rate": float(onset_rate),
             "spectral_centroid": float(np.mean(centroids)),
             "spectral_rolloff": float(np.mean(rolloffs)),
             "spectral_flux": float(np.mean(fluxes)),
             "zcr": float(np.mean(zcrs)),
+            # Temporal variation (frame-level std dev).
+            "spectral_centroid_std": float(np.std(centroids)),
+            "spectral_rolloff_std": float(np.std(rolloffs)),
+            "spectral_flux_std": float(np.std(fluxes)),
+            "zcr_std": float(np.std(zcrs)),
         }
-        for i, val in enumerate(mfccs_arr.mean(axis=0)):
-            features[f"mfcc_{i+1}"] = float(val)
+        mfcc_means = mfccs_arr.mean(axis=0)
+        mfcc_stds = mfccs_arr.std(axis=0)
+        for i in range(mfccs_arr.shape[1]):
+            features[f"mfcc_{i+1}"] = float(mfcc_means[i])
+            features[f"mfcc_{i+1}_std"] = float(mfcc_stds[i])
         return features
     except Exception:
         print("Audio analysis failed for %s", audio_path)
         return None
+
+
+_KEY_MAP: dict[str, int] = {
+    "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
+    "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7, "G#": 8,
+    "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11,
+}
+
+
+def _key_to_int(key_str: str) -> int:
+    """Convert a key string (e.g. 'C#') to a semitone integer 0-11."""
+    return _KEY_MAP.get(key_str.strip(), -1)

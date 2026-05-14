@@ -53,6 +53,50 @@ PAIRWISE_FEATURE_COLS: list[str] = [
     "popularity_diff_norm",
     "popularity_zscore",
     "popularity_available",
+    # --- Interaction features ---
+    # Amplify the signal when both genre-fit and semantic-fit agree (or both
+    # disagree). Tree models can approximate interactions, but giving them
+    # the product explicitly makes the split much cheaper to learn.
+    "genre_semantic_interaction",
+    "audio_genre_interaction",
+    # --- Text embedding features beyond cosine ---
+    "semantic_l2_distance",
+    # Divergence between how well the track fits the playlist's *accepted
+    # tracks* centroid vs its title/description alone. High values indicate
+    # the playlist's historical preferences differ from its stated genre.
+    "title_semantic_diff",
+    # --- Per-dimension audio diffs (z-score) for the most discriminative
+    # audio attributes. Complement the aggregate zscore_mean/max with
+    # fine-grained dimension signals. Default to 0.0 when the dimension is
+    # not in the audio feature set or audio data is missing.
+    "bpm_diff",
+    "energy_diff",
+    "danceability_diff",
+    # Fraction of audio dimensions where the track's value falls within the
+    # observed [min, max] range of the playlist's accepted tracks. Captures
+    # the "audio envelope" fit better than centroid distance alone.
+    "audio_range_ratio",
+    # --- Playlist-level structural features ---
+    # log-compressed to avoid the dominance issue noted for the raw counts.
+    "playlist_size_log",
+    "playlist_genre_richness",
+    "playlist_audio_available",
+    # --- Soft-attribute features ---
+    # Playlist-side structural: always available, lets the model learn that
+    # attribute-rich playlists behave differently from attribute-sparse ones.
+    "playlist_n_soft_attrs",
+    "playlist_has_language",
+    "playlist_has_mood",
+    # Pairwise overlap: requires track-side soft attributes which are only
+    # available at inference time (user-supplied via TrackInput). At training
+    # time these default to 0.0 with soft_attr_available=0.0 so the model
+    # learns to ignore them when data is missing. As track-side attributes
+    # enter the training set in the future, these features will naturally
+    # activate and the model will learn proper weights.
+    "mood_match_flag",
+    "language_match_flag",
+    "activity_match_flag",
+    "soft_attr_available",
 ]
 
 
@@ -92,6 +136,62 @@ def _audio_l2(track_audio: np.ndarray, centroid: np.ndarray) -> float:
     if diff.size == 0:
         return 0.0
     return float(np.sqrt(np.mean(diff * diff)))
+
+
+def _l2(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """L2 (Euclidean) distance between two vectors. 0.0 when either is None."""
+    if a is None or b is None:
+        return 0.0
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    diff = a - b
+    diff = diff[~np.isnan(diff)]
+    if diff.size == 0:
+        return 0.0
+    return float(np.sqrt(np.dot(diff, diff)))
+
+
+def _per_dim_zscore(
+    track_audio: np.ndarray | None,
+    centroid: np.ndarray | None,
+    std: np.ndarray | None,
+    dim_index: int | None,
+) -> float:
+    """Z-score for a single audio dimension. 0.0 when data is missing."""
+    if dim_index is None or track_audio is None or centroid is None or std is None:
+        return 0.0
+    if dim_index >= len(track_audio):
+        return 0.0
+    tv = track_audio[dim_index]
+    cv = centroid[dim_index]
+    sv = std[dim_index]
+    if np.isnan(tv) or np.isnan(cv):
+        return 0.0
+    return float(abs(tv - cv) / (sv + 1e-3))
+
+
+def _audio_range_ratio(
+    track_audio: np.ndarray | None,
+    audio_min: np.ndarray | None,
+    audio_max: np.ndarray | None,
+) -> float:
+    """Fraction of audio dims where track value falls within [min, max]."""
+    if track_audio is None or audio_min is None or audio_max is None:
+        return 0.0
+    valid = 0
+    inside = 0
+    for i in range(len(track_audio)):
+        tv = track_audio[i]
+        lo = audio_min[i]
+        hi = audio_max[i]
+        if np.isnan(tv) or np.isnan(lo) or np.isnan(hi):
+            continue
+        valid += 1
+        if lo <= tv <= hi:
+            inside += 1
+    if valid == 0:
+        return 0.0
+    return float(inside / valid)
 
 
 def _popularity_features(
@@ -190,6 +290,11 @@ def build_pair_features(
     zero_audio = np.full(audio_dim, np.nan, dtype=np.float64) if audio_dim else None
     pop_lookup = track_popularity_by_id or {}
 
+    _audio_idx: dict[str, int] = {name: i for i, name in enumerate(audio_cols)}
+    bpm_idx = _audio_idx.get("bpm")
+    energy_idx = _audio_idx.get("energy")
+    dance_idx = _audio_idx.get("danceability")
+
     out_records: list[dict] = []
     for record in rows.to_dict(orient="records"):
         tid = str(record["track_id"])
@@ -207,9 +312,13 @@ def build_pair_features(
         if prof is not None and track_emb is not None:
             semantic_similarity = _cosine(track_emb, prof.semantic_centroid)
             title_text_similarity = _cosine(track_emb, prof.text_emb)
+            semantic_l2_distance = _l2(track_emb, prof.semantic_centroid)
         else:
             semantic_similarity = 0.0
             title_text_similarity = 0.0
+            semantic_l2_distance = 0.0
+
+        title_semantic_diff = abs(semantic_similarity - title_text_similarity)
 
         if prof is not None and prof.audio_centroid is not None and track_audio is not None:
             audio_norm_track = _safe_normalize(track_audio.astype(np.float64))
@@ -220,12 +329,20 @@ def build_pair_features(
                 track_audio, prof.audio_centroid, prof.audio_std
             )
             track_audio_available = 1.0
+            bpm_diff_val = _per_dim_zscore(track_audio, prof.audio_centroid, prof.audio_std, bpm_idx)
+            energy_diff_val = _per_dim_zscore(track_audio, prof.audio_centroid, prof.audio_std, energy_idx)
+            dance_diff_val = _per_dim_zscore(track_audio, prof.audio_centroid, prof.audio_std, dance_idx)
+            audio_range_ratio = _audio_range_ratio(track_audio, prof.audio_min, prof.audio_max)
         else:
             audio_centroid_cosine = 0.0
             audio_centroid_l2 = 0.0
             audio_z_mean = 0.0
             audio_z_max = 0.0
             track_audio_available = 1.0 if track_audio is not None else 0.0
+            bpm_diff_val = 0.0
+            energy_diff_val = 0.0
+            dance_diff_val = 0.0
+            audio_range_ratio = 0.0
 
         if prof is not None:
             tags_overlap = jaccard(track_tags, prof.tags)
@@ -237,6 +354,13 @@ def build_pair_features(
             declined_count = float(prof.declined_count)
             playlist_pop_mean = prof.popularity_mean
             playlist_pop_std = prof.popularity_std
+            playlist_size_log = float(np.log1p(prof.accepted_count))
+            playlist_genre_richness = float(np.log1p(len(prof.tags)))
+            playlist_audio_available = 1.0 if prof.audio_centroid is not None else 0.0
+            pl_soft = prof.soft_attribute_sets()
+            playlist_n_soft_attrs = float(sum(1 for v in pl_soft.values() if v))
+            playlist_has_language = 1.0 if pl_soft.get("languages") else 0.0
+            playlist_has_mood = 1.0 if pl_soft.get("moods") else 0.0
         else:
             tags_overlap = 0.0
             overlap_count = 0.0
@@ -247,6 +371,38 @@ def build_pair_features(
             declined_count = 0.0
             playlist_pop_mean = None
             playlist_pop_std = None
+            playlist_size_log = 0.0
+            playlist_genre_richness = 0.0
+            playlist_audio_available = 0.0
+            pl_soft = {}
+            playlist_n_soft_attrs = 0.0
+            playlist_has_language = 0.0
+            playlist_has_mood = 0.0
+
+        # Pairwise soft-attribute overlap features. Track-side soft attrs
+        # are injected via `_soft_*` keys in the track_meta dict at inference
+        # time. At training time these keys are absent, so all overlap
+        # features default to 0.0 with soft_attr_available=0.0.
+        track_soft_moods: set[str] = meta.get("_soft_moods", set())
+        track_soft_langs: set[str] = meta.get("_soft_languages", set())
+        track_soft_acts: set[str] = meta.get("_soft_activities", set())
+        has_any_soft = bool(track_soft_moods or track_soft_langs or track_soft_acts)
+        soft_attr_available = 1.0 if has_any_soft else 0.0
+
+        pl_moods = pl_soft.get("moods", set())
+        pl_langs = pl_soft.get("languages", set())
+        pl_acts = pl_soft.get("activities", set())
+        mood_match_flag = (
+            1.0 if (track_soft_moods and pl_moods and (track_soft_moods & pl_moods)) else 0.0
+        )
+        language_match_flag = (
+            1.0 if (track_soft_langs and pl_langs and (track_soft_langs & pl_langs)) else 0.0
+        )
+        if track_soft_acts and pl_acts:
+            union = len(track_soft_acts | pl_acts)
+            activity_match_flag = float(len(track_soft_acts & pl_acts)) / union if union else 0.0
+        else:
+            activity_match_flag = 0.0
 
         pop_feats = _popularity_features(
             pop_lookup.get(tid),
@@ -273,6 +429,25 @@ def build_pair_features(
                 "playlist_declined_track_count": declined_count,
                 "track_audio_available": track_audio_available,
                 **pop_feats,
+                # --- New features ---
+                "genre_semantic_interaction": tags_overlap * semantic_similarity,
+                "audio_genre_interaction": audio_centroid_cosine * overlap_count,
+                "semantic_l2_distance": semantic_l2_distance,
+                "title_semantic_diff": title_semantic_diff,
+                "bpm_diff": bpm_diff_val,
+                "energy_diff": energy_diff_val,
+                "danceability_diff": dance_diff_val,
+                "audio_range_ratio": audio_range_ratio,
+                "playlist_size_log": playlist_size_log,
+                "playlist_genre_richness": playlist_genre_richness,
+                "playlist_audio_available": playlist_audio_available,
+                "playlist_n_soft_attrs": playlist_n_soft_attrs,
+                "playlist_has_language": playlist_has_language,
+                "playlist_has_mood": playlist_has_mood,
+                "mood_match_flag": mood_match_flag,
+                "language_match_flag": language_match_flag,
+                "activity_match_flag": activity_match_flag,
+                "soft_attr_available": soft_attr_available,
             }
         )
 

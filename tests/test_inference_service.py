@@ -519,10 +519,10 @@ def test_explicit_genre_filter_overtagged_playlist_is_demoted(tmp_path: Path) ->
     # Focused blues playlist must outrank the over-tagged catch-all even
     # though both have a primary `blues` overlap.
     assert recs[0].playlist_id == "p_focused_blues"
-    # 12 primary tags -> breadth multiplier = 4/12 ≈ 0.33; focused playlist
-    # is unscaled. So the over-tagged score should be ~0.33x of focused.
+    # 12 primary tags -> sqrt breadth multiplier = sqrt(4/12) ≈ 0.577;
+    # focused playlist is unscaled. The ratio should be clearly below 1.0.
     ratio = by_id["p_genre_soup"] / by_id["p_focused_blues"]
-    assert ratio <= 0.5, f"expected over-tagged ratio <= 0.5, got {ratio}"
+    assert ratio <= 0.75, f"expected over-tagged ratio <= 0.75, got {ratio}"
 
 
 def test_soft_attribute_penalty_disabled_when_user_inputs_empty(tmp_path: Path) -> None:

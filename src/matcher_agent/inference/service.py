@@ -23,7 +23,9 @@ from matcher_agent.features.playlist_profiles import (
     build_playlist_text_strings,
     build_profiles,
     build_track_popularity_lookup,
+    build_track_text,
     build_track_text_strings,
+    ensure_audio_columns,
 )
 from matcher_agent.models import PlaylistRecommendation, TrackInput, parse_track_tier
 
@@ -47,7 +49,7 @@ class MatcherService:
         explicit_genre_no_match_penalty: float = 0.02,
         explicit_genre_untagged_penalty: float = 0.3,
         explicit_genre_subgenre_only_penalty: float = 0.4,
-        explicit_genre_broadtag_threshold: int = 4,
+        explicit_genre_broadtag_threshold: int = 6,
     ):
         print(f"[Recommend] Loading model artifacts from {artifact_dir}")
         bundle = load_bundle(Path(artifact_dir))
@@ -97,6 +99,7 @@ class MatcherService:
         historical_df = historical_df.dropna(subset=["track_id", "playlist_id", "label"])
 
         tracks_df = tracks_df.copy()
+        tracks_df = ensure_audio_columns(tracks_df)
         tracks_df["track_id"] = tracks_df["track_id"].astype("string")
         tracks_df = tracks_df.drop_duplicates(subset=["track_id"], keep="last")
 
@@ -151,40 +154,24 @@ class MatcherService:
         )
 
     def _track_text_for_input(self, track: TrackInput) -> str:
-        """Build the text we embed for `semantic_similarity`.
+        """Build the text we embed for ``semantic_similarity``.
 
-        We inject every authoritative genre signal we have into the text:
-          1. Spotify-provided `artist_genres` (works for well-known artists).
-          2. User-supplied `track.genres` and `track.subgenres` (high-confidence
-             curator-style labels). Without this injection, the user-supplied
-             genres only flow into the discrete `genre_*` features (low model
-             importance) and are invisible to the dominant `semantic_similarity`
-             signal -- which is why obscure artists with only user-supplied
-             genres got matched to genre-irrelevant playlists.
+        Delegates to the shared ``build_track_text`` so training and
+        inference produce identical text for the same metadata. All
+        authoritative genre signals (Spotify artist_genres, user-supplied
+        genres/subgenres) are injected so the text embedding is genre-aware.
         """
-        artist = (track.artist or "").strip()
-        name = (track.track_name or "").strip()
-        base = f"{artist} - {name}" if (artist and name) else (name or artist)
-        genre_terms: list[str] = []
-        for source in (track.artist_genres, track.genres, track.subgenres):
-            if source:
-                genre_terms.extend(source)
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for term in genre_terms:
-            t = (term or "").strip().lower()
-            if t and t not in seen:
-                seen.add(t)
-                deduped.append(t)
-        suffix_parts: list[str] = []
-        if deduped:
-            suffix_parts.append(f"Genres: {', '.join(deduped)}.")
-        lang_labels = normalize_attribute_labels(track.languages)
-        if lang_labels:
-            suffix_parts.append(f"Language: {', '.join(sorted(lang_labels))}.")
-        if suffix_parts:
-            return f"{base}. " + " ".join(suffix_parts)
-        return base
+        lang_labels = sorted(normalize_attribute_labels(track.languages))
+        mood_labels = sorted(normalize_attribute_labels(track.moods))
+        return build_track_text(
+            artist=track.artist or "",
+            track_name=track.track_name or "",
+            artist_genres=track.artist_genres or None,
+            genres=track.genres or None,
+            subgenres=track.subgenres or None,
+            languages=lang_labels or None,
+            moods=mood_labels or None,
+        )
 
     def recommend_playlists(self, track: TrackInput, n: int) -> list[PlaylistRecommendation]:
         track_id = track.track_id or "__adhoc_track__"
@@ -251,6 +238,9 @@ class MatcherService:
                 "artist": track.artist or "",
                 "album": track.album or "",
                 "_cached_tags": track_tags,
+                "_soft_moods": track_soft.get("moods", set()),
+                "_soft_languages": track_soft.get("languages", set()),
+                "_soft_activities": track_soft.get("activities", set()),
             },
         }
         audio_lookup = dict(self.track_audio_by_id)
@@ -399,10 +389,14 @@ class MatcherService:
              * playlist has tags but zero overlap -> `no_match_penalty`
                (e.g. 0.02 -- effectively dropped)
           2. Breadth multiplier: if the playlist's primary genre count
-             exceeds `broadtag_threshold`, scale by
-             `threshold / len(primary_tags)`. This kills catch-all
-             playlists where the curator selected every genre on the
-             dropdown.
+             exceeds `broadtag_threshold`, apply a **sqrt** decay:
+             ``sqrt(threshold / len(primary_tags))``.  This is gentler
+             than the previous linear ``threshold / len(...)`` rule —
+             a playlist with 12 primary tags and threshold=6 now gets
+             ``sqrt(6/12)=0.71`` instead of ``6/12=0.50``.  This
+             avoids over-penalizing playlists that are legitimately
+             multi-genre while still down-weighting "tag-everything"
+             catch-all playlists.
         Final = tier * breadth.
 
         Without (1), a Rock playlist with "Blues Rock" subgenre wins
@@ -410,9 +404,11 @@ class MatcherService:
         Without (2), a "tag-everything" lo-fi/chillhop playlist matches
         every track because the curator selected all 24 primary genres.
         """
+        import math
+
         n = len(feats)
         multipliers = np.ones(n, dtype=np.float64)
-        counts = {
+        counts: dict[str, int] = {
             "primary_overlap": 0,
             "subgenre_only": 0,
             "no_overlap": 0,
@@ -440,10 +436,10 @@ class MatcherService:
             else:
                 tier_mult = self.explicit_genre_no_match_penalty
                 counts["no_overlap"] += 1
-            # Over-tagging penalty (curator selected too many primary genres).
+            # Over-tagging guard: sqrt-based decay instead of linear.
             breadth = len(primary) if primary else len(prof.tags)
             if breadth > threshold:
-                breadth_mult = float(threshold) / float(breadth)
+                breadth_mult = math.sqrt(float(threshold) / float(breadth))
                 counts["broadtag_penalized"] += 1
             else:
                 breadth_mult = 1.0

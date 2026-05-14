@@ -4,13 +4,17 @@ import argparse
 import asyncio
 import json
 
+from pathlib import Path
+
 from matcher_agent.audio.analyzer import analyze_audio
 from matcher_agent.audio.downloader import download_preview
+from matcher_agent.audio.whisper_language import detect_spoken_language_from_audio
 from matcher_agent.clients.preview_resolver_client import enrich_tracks_preview_urls
 from matcher_agent.clients.spotify_client import fetch_track_by_id, get_spotify_client
 from matcher_agent.config import get_settings
 from matcher_agent.data.repository import DataRepository
 from matcher_agent.embeddings import TextEmbedder
+from matcher_agent.features.attribute_normalizer import normalize_attribute_labels
 from matcher_agent.inference.service import MatcherService
 from matcher_agent.models import TrackInput
 from matcher_agent.storage.parquet_store import ParquetStore
@@ -97,9 +101,11 @@ def main() -> None:
 
     extra_features: dict = {}
     preview_url = resolved.get("preview_url")
+    audio_path: Path | None = None
     if preview_url:
-        audio_path = download_preview(resolved["track_id"], preview_url, settings.audio_dir)
-        if audio_path:
+        downloaded = download_preview(resolved["track_id"], preview_url, settings.audio_dir)
+        if downloaded:
+            audio_path = Path(downloaded)
             print(f"[RecommendCLI] Analyzing audio file {audio_path}")
             audio_features = analyze_audio(audio_path)
             if audio_features:
@@ -107,11 +113,41 @@ def main() -> None:
                 extra_features["audio_path"] = str(audio_path)
                 print(f"[RecommendCLI] Audio analysis completed features={len(audio_features)}")
             else:
-                print(f"[RecommendCLI] Audio analysis failed for {audio_path}; scoring without audio features.")
+                print(
+                    f"[RecommendCLI] Audio analysis failed for {audio_path}; "
+                    "scoring without audio features."
+                )
         else:
             print("[RecommendCLI] Preview download failed; scoring without audio features.")
     else:
         print("[RecommendCLI] No preview URL available; scoring without audio features.")
+
+    track_languages = [str(v).strip() for v in args.track_language if str(v).strip()]
+    if not normalize_attribute_labels(track_languages):
+        if settings.whisper_language_detection and audio_path is not None:
+            print(
+                "[RecommendCLI] No --track-language; detecting language with local Whisper "
+                f"(model={settings.whisper_model!r})…"
+            )
+            detected = detect_spoken_language_from_audio(
+                audio_path,
+                model_name=settings.whisper_model,
+                device=settings.whisper_device,
+            )
+            if detected:
+                track_languages.append(detected)
+                extra_features["whisper_detected_language"] = detected
+                print(f"[RecommendCLI] Whisper language={detected!r} added to track languages.")
+            else:
+                print(
+                    "[RecommendCLI] Whisper did not return a language "
+                    "(install openai-whisper or check logs); continuing without track language."
+                )
+        elif audio_path is None:
+            print(
+                "[RecommendCLI] No --track-language and no preview audio file; "
+                "cannot run Whisper language detection."
+            )
 
     print(f"[RecommendCLI] Initializing data repository from {settings.data_dir}")
     repo = DataRepository(ParquetStore(settings.data_dir))
@@ -168,7 +204,7 @@ def main() -> None:
             subgenres=args.track_subgenre,
             moods=args.track_mood,
             activities=args.track_activity,
-            languages=args.track_language,
+            languages=track_languages,
             countries=args.track_country,
             tempos=args.track_tempo,
             tier=args.track_tier,

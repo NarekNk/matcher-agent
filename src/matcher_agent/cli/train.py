@@ -6,7 +6,7 @@ from matcher_agent.config import get_settings
 from matcher_agent.data.repository import DataRepository
 from matcher_agent.embeddings import TextEmbedder
 from matcher_agent.storage.parquet_store import ParquetStore
-from matcher_agent.training.train_ranker import train_ranker
+from matcher_agent.training.train_ranker import NegativeSamplingConfig, train_ranker
 
 
 def main() -> None:
@@ -34,10 +34,22 @@ def main() -> None:
         "--negative-conflict-fraction",
         type=float,
         default=None,
-        help="Fraction of negatives that must be genre-conflicting (zero "
-        "canonical-tag overlap with the track). Defaults to "
-        "NEGATIVE_CONFLICT_FRACTION env var (0.5). Use 0 for pure random "
-        "sampling, 1 for only genre-conflict negatives.",
+        help="Fraction of negatives that are genre-conflicting. "
+        "Defaults to NEGATIVE_CONFLICT_FRACTION env var (0.33).",
+    )
+    parser.add_argument(
+        "--near-miss-fraction",
+        type=float,
+        default=None,
+        help="Fraction of negatives that are near-miss (semantically "
+        "similar to the accepted playlist). Defaults to "
+        "NEGATIVE_NEAR_MISS_FRACTION env var (0.33).",
+    )
+    parser.add_argument(
+        "--no-popularity-stratified",
+        action="store_true",
+        help="Disable popularity-stratified random negatives "
+        "(use uniform random instead).",
     )
     args = parser.parse_args()
 
@@ -46,15 +58,27 @@ def main() -> None:
     semantic_blend = (
         args.semantic_blend if args.semantic_blend is not None else settings.semantic_blend
     )
-    negative_sample_ratio = (
-        args.negative_sample_ratio
-        if args.negative_sample_ratio is not None
-        else settings.negative_sample_ratio
-    )
-    negative_conflict_fraction = (
-        args.negative_conflict_fraction
-        if args.negative_conflict_fraction is not None
-        else settings.negative_conflict_fraction
+
+    sampling_config = NegativeSamplingConfig(
+        ratio=(
+            args.negative_sample_ratio
+            if args.negative_sample_ratio is not None
+            else settings.negative_sample_ratio
+        ),
+        conflict_fraction=(
+            args.negative_conflict_fraction
+            if args.negative_conflict_fraction is not None
+            else settings.negative_conflict_fraction
+        ),
+        near_miss_fraction=(
+            args.near_miss_fraction
+            if args.near_miss_fraction is not None
+            else settings.negative_near_miss_fraction
+        ),
+        popularity_stratified=(
+            False if args.no_popularity_stratified
+            else settings.negative_popularity_stratified
+        ),
     )
 
     repo = DataRepository(ParquetStore(settings.data_dir))
@@ -75,8 +99,7 @@ def main() -> None:
 
     print(
         f"[TrainCLI] Training config: semantic_blend={semantic_blend} "
-        f"negative_sample_ratio={negative_sample_ratio} "
-        f"negative_conflict_fraction={negative_conflict_fraction}"
+        f"sampling={sampling_config}"
     )
     result = train_ranker(
         matches_df=labeled_matches,
@@ -87,8 +110,7 @@ def main() -> None:
         model_dir=settings.model_dir,
         random_state=settings.random_state,
         semantic_blend=semantic_blend,
-        negative_sample_ratio=negative_sample_ratio,
-        negative_conflict_fraction=negative_conflict_fraction,
+        sampling_config=sampling_config,
     )
     print(
         f"[TrainCLI] Completed: rows={result.rows} auc_pr={result.auc_pr:.4f} "

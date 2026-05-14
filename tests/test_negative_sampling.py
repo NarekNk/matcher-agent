@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from matcher_agent.training.dataset import build_training_bundle
-from matcher_agent.training.train_ranker import _augment_with_random_negatives
+from matcher_agent.training.train_ranker import (
+    NegativeSamplingConfig,
+    _augment_with_negatives,
+    _augment_with_random_negatives,
+    _precompute_similar_playlists,
+)
 
 
 class _StubEmbedder:
@@ -246,3 +252,166 @@ def test_playlist_anchored_conflicts_when_track_text_lacks_genre_keywords() -> N
         f"Expected country_pl as the genre-conflict negative for a track "
         f"accepted on rap_pl; got {neg_pid}"
     )
+
+
+# ---- NegativeSamplingConfig tests ----
+
+
+def test_config_random_fraction_computed() -> None:
+    cfg = NegativeSamplingConfig(ratio=5.0, conflict_fraction=0.33, near_miss_fraction=0.33)
+    assert abs(cfg.random_fraction - 0.34) < 1e-9
+
+
+def test_config_rejects_fractions_over_one() -> None:
+    with pytest.raises(ValueError, match="must be <= 1.0"):
+        NegativeSamplingConfig(conflict_fraction=0.6, near_miss_fraction=0.5)
+
+
+def test_config_from_legacy_disables_near_miss() -> None:
+    cfg = NegativeSamplingConfig.from_legacy(ratio=3.0, conflict_fraction=0.5)
+    assert cfg.ratio == 3.0
+    assert cfg.conflict_fraction == 0.5
+    assert cfg.near_miss_fraction == 0.0
+    assert cfg.popularity_stratified is False
+    assert cfg.random_fraction == 0.5
+
+
+# ---- Near-miss sampling tests ----
+
+
+def test_precompute_similar_playlists_returns_top_k() -> None:
+    emb = {
+        "p1": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        "p2": np.array([0.9, 0.1, 0.0], dtype=np.float32),
+        "p3": np.array([0.0, 0.0, 1.0], dtype=np.float32),
+    }
+    similar = _precompute_similar_playlists(emb, k=2)
+    assert "p1" in similar
+    assert similar["p1"][0] == "p2"
+
+
+def test_near_miss_negatives_are_semantically_similar() -> None:
+    """With near_miss_fraction=1.0, all negatives should come from
+    playlists most similar to the accepted one."""
+    matches, tracks, playlists, bundle = _setup_three_genre_world()
+    train_df = bundle.pair_features
+
+    config = NegativeSamplingConfig(
+        ratio=1.0, conflict_fraction=0.0, near_miss_fraction=1.0,
+        popularity_stratified=False,
+    )
+    augmented = _augment_with_negatives(
+        train_df,
+        train_matches=matches,
+        playlists_df=playlists,
+        train_bundle=bundle,
+        config=config,
+        random_state=42,
+    )
+    new_negs = augmented[augmented["label"] == 0]
+    assert len(new_negs) > 0
+
+    # Each negative should be a playlist different from the accepted one
+    # but in the near-miss neighborhood (top-K similar). With only 3
+    # playlists all negatives must be one of the other two.
+    for _, row in new_negs.iterrows():
+        tid = str(row["track_id"])
+        neg_pid = str(row["playlist_id"])
+        pitched = {
+            str(r.playlist_id)
+            for r in matches[matches["track_id"].astype(str) == tid].itertuples()
+        }
+        assert neg_pid not in pitched
+
+
+def test_three_tier_split_produces_all_types() -> None:
+    """With equal 1/3 fractions and enough playlists, all three pools
+    should produce at least one negative."""
+    # Build a larger world with 6 playlists in 3 genres.
+    playlists = pd.DataFrame(
+        [
+            {"playlist_id": "hh1", "playlist_name": "Hip-Hop Hits", "description": "rap trap"},
+            {"playlist_id": "hh2", "playlist_name": "Rap Life", "description": "hip hop rap"},
+            {"playlist_id": "co1", "playlist_name": "Country Roads", "description": "country"},
+            {"playlist_id": "co2", "playlist_name": "Nashville Now", "description": "country"},
+            {"playlist_id": "edm1", "playlist_name": "EDM House", "description": "electro house"},
+            {"playlist_id": "edm2", "playlist_name": "Dance Floor", "description": "house edm"},
+        ]
+    )
+    matches = pd.DataFrame(
+        [
+            {"playlist_id": "hh1", "track_id": "t1", "track_name": "Drill", "artist": "MC", "label": 1},
+            {"playlist_id": "co1", "track_id": "t2", "track_name": "Pickup", "artist": "Joe", "label": 1},
+            {"playlist_id": "edm1", "track_id": "t3", "track_name": "House", "artist": "DJ", "label": 1},
+        ]
+    )
+    tracks = pd.DataFrame(
+        [
+            {"track_id": "t1", "artist": "MC", "track_name": "Drill", "bpm": 140},
+            {"track_id": "t2", "artist": "Joe", "track_name": "Pickup", "bpm": 90},
+            {"track_id": "t3", "artist": "DJ", "track_name": "House", "bpm": 128},
+        ]
+    )
+    bundle = build_training_bundle(
+        matches, tracks, playlists, text_embedder=_StubEmbedder(), semantic_blend=0.25,
+    )
+    train_df = bundle.pair_features
+
+    config = NegativeSamplingConfig(
+        ratio=4.0, conflict_fraction=0.33, near_miss_fraction=0.33,
+        popularity_stratified=False,
+    )
+    augmented = _augment_with_negatives(
+        train_df,
+        train_matches=matches,
+        playlists_df=playlists,
+        train_bundle=bundle,
+        config=config,
+        random_state=42,
+    )
+    n_new = len(augmented) - len(train_df)
+    # 3 positives * 4.0 ratio = 12 negatives target
+    assert n_new == 12
+
+
+def test_popularity_stratified_random_negatives() -> None:
+    """Stratified sampling produces negatives from multiple tiers."""
+    playlists = pd.DataFrame(
+        [
+            {"playlist_id": "t1_a", "playlist_name": "Tier1 A", "description": "rap", "tier": 1},
+            {"playlist_id": "t2_a", "playlist_name": "Tier2 A", "description": "country", "tier": 2},
+            {"playlist_id": "t3_a", "playlist_name": "Tier3 A", "description": "house", "tier": 3},
+            {"playlist_id": "t4_a", "playlist_name": "Tier4 A", "description": "pop", "tier": 4},
+        ]
+    )
+    matches = pd.DataFrame(
+        [
+            {"playlist_id": "t1_a", "track_id": "t1", "track_name": "Drill", "artist": "MC", "label": 1},
+        ]
+    )
+    tracks = pd.DataFrame(
+        [{"track_id": "t1", "artist": "MC", "track_name": "Drill", "bpm": 140}]
+    )
+    bundle = build_training_bundle(
+        matches, tracks, playlists, text_embedder=_StubEmbedder(), semantic_blend=0.25,
+    )
+    train_df = bundle.pair_features
+
+    config = NegativeSamplingConfig(
+        ratio=30.0, conflict_fraction=0.0, near_miss_fraction=0.0,
+        popularity_stratified=True,
+    )
+    augmented = _augment_with_negatives(
+        train_df,
+        train_matches=matches,
+        playlists_df=playlists,
+        train_bundle=bundle,
+        config=config,
+        random_state=42,
+    )
+    new_negs = augmented[augmented["label"] == 0]
+    neg_pids = set(new_negs["playlist_id"].astype(str))
+    # With stratified sampling across 4 tiers and 30 negatives, we
+    # should see negatives from at least 2 different tiers (the
+    # pitched tier1 playlist is excluded, leaving 3 candidates).
+    assert len(neg_pids) >= 2, f"Expected negatives from multiple tiers, got {neg_pids}"

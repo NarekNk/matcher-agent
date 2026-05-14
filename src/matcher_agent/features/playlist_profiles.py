@@ -13,9 +13,12 @@ from matcher_agent.features.genre_normalizer import normalize_xano_labels
 from matcher_agent.features.genre_tagger import tag_text
 from matcher_agent.models import coerce_playlist_tier
 
-# Audio columns used to build per-playlist accepted-track centroids. Kept small
-# and meaningful so missing audio for some tracks doesn't dominate noise.
+# Audio columns used to build per-playlist accepted-track centroids.
+# Order matters: new columns are appended at the end so that legacy
+# cached data (which only has the first 21 columns) can be loaded and
+# extended with NaN for the missing tail.
 AUDIO_FEATURE_COLS: tuple[str, ...] = (
+    # --- original 21 features (v1) ---
     "bpm",
     "loudness",
     "danceability",
@@ -37,23 +40,154 @@ AUDIO_FEATURE_COLS: tuple[str, ...] = (
     "mfcc_11",
     "mfcc_12",
     "mfcc_13",
+    # --- v2: key, mode, onset rate ---
+    "key",
+    "mode",
+    "onset_rate",
+    # --- v2: temporal variation (frame-level std dev) ---
+    "spectral_centroid_std",
+    "spectral_rolloff_std",
+    "spectral_flux_std",
+    "zcr_std",
+    "mfcc_1_std",
+    "mfcc_2_std",
+    "mfcc_3_std",
+    "mfcc_4_std",
+    "mfcc_5_std",
+    "mfcc_6_std",
+    "mfcc_7_std",
+    "mfcc_8_std",
+    "mfcc_9_std",
+    "mfcc_10_std",
+    "mfcc_11_std",
+    "mfcc_12_std",
+    "mfcc_13_std",
 )
 
 
+def ensure_audio_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill any missing AUDIO_FEATURE_COLS with NaN for backward compat.
+
+    Old cached data (CSV / parquet) may not contain the v2 columns
+    (key, mode, onset_rate, *_std). Adding them as NaN lets downstream
+    code (SimpleImputer, profile builder) handle them gracefully.
+    """
+    missing = [c for c in AUDIO_FEATURE_COLS if c not in df.columns]
+    if missing:
+        for c in missing:
+            df[c] = np.nan
+    return df
+
+
+def _dedup_terms(*sources: list[str] | None) -> list[str]:
+    """Merge multiple label lists into a deduplicated, lowercased list."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for source in sources:
+        if not source:
+            continue
+        for term in source:
+            t = (term or "").strip().lower()
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
+
+
+def build_track_text(
+    *,
+    artist: str = "",
+    track_name: str = "",
+    artist_genres: list[str] | None = None,
+    genres: list[str] | None = None,
+    subgenres: list[str] | None = None,
+    languages: list[str] | None = None,
+    moods: list[str] | None = None,
+) -> str:
+    """Build the text string that gets embedded for a track.
+
+    Shared between training (DataFrame rows) and inference (TrackInput).
+    Genre/language/mood metadata is appended when available so the text
+    embedding captures genre-awareness — matching the inference-time
+    enrichment that was previously only done in ``_track_text_for_input``.
+    """
+    artist = (artist or "").strip()
+    track_name = (track_name or "").strip()
+    base = f"{artist} - {track_name}" if (artist and track_name) else (track_name or artist)
+
+    suffix_parts: list[str] = []
+    genre_terms = _dedup_terms(artist_genres, genres, subgenres)
+    if genre_terms:
+        suffix_parts.append(f"Genres: {', '.join(genre_terms)}.")
+    lang_terms = _dedup_terms(languages)
+    if lang_terms:
+        suffix_parts.append(f"Language: {', '.join(lang_terms)}.")
+    mood_terms = _dedup_terms(moods)
+    if mood_terms:
+        suffix_parts.append(f"Mood: {', '.join(mood_terms)}.")
+    if suffix_parts:
+        return f"{base}. " + " ".join(suffix_parts)
+    return base
+
+
+def build_playlist_text(
+    *,
+    playlist_name: str = "",
+    description: str = "",
+    genres: list[str] | None = None,
+    subgenres: list[str] | None = None,
+    moods: list[str] | None = None,
+    activities: list[str] | None = None,
+) -> str:
+    """Build the text string that gets embedded for a playlist.
+
+    Genre/mood/activity metadata from Xano enriches the description so
+    the text embedding reflects the curator's intent, not just the
+    (often generic) playlist name.
+    """
+    name = (playlist_name or "").strip()
+    desc = (description or "").strip()
+    if desc and desc.lower() != "nan":
+        base = f"{name}. {desc}"
+    else:
+        base = name
+
+    suffix_parts: list[str] = []
+    genre_terms = _dedup_terms(genres, subgenres)
+    if genre_terms:
+        suffix_parts.append(f"Genres: {', '.join(genre_terms)}.")
+    mood_terms = _dedup_terms(moods)
+    if mood_terms:
+        suffix_parts.append(f"Mood: {', '.join(mood_terms)}.")
+    act_terms = _dedup_terms(activities)
+    if act_terms:
+        suffix_parts.append(f"Activity: {', '.join(act_terms)}.")
+    if suffix_parts:
+        return f"{base}. " + " ".join(suffix_parts)
+    return base
+
+
 def _track_text(row: pd.Series) -> str:
-    artist = str(row.get("artist") or "").strip()
-    name = str(row.get("track_name") or "").strip()
-    if artist and name:
-        return f"{artist} - {name}"
-    return name or artist
+    return build_track_text(
+        artist=str(row.get("artist") or ""),
+        track_name=str(row.get("track_name") or ""),
+        artist_genres=_coerce_label_list(row.get("artist_genres")),
+        genres=_coerce_label_list(row.get("genres")),
+        subgenres=_coerce_label_list(row.get("subgenres")),
+        languages=_coerce_label_list(row.get("languages")),
+        moods=_coerce_label_list(row.get("moods")),
+    )
 
 
 def _playlist_text(row: pd.Series) -> str:
-    name = str(row.get("playlist_name") or "").strip()
-    desc = str(row.get("description") or "").strip()
-    if desc and desc.lower() != "nan":
-        return f"{name}. {desc}"
-    return name
+    return build_playlist_text(
+        playlist_name=str(row.get("playlist_name") or ""),
+        description=str(row.get("description") or ""),
+        genres=_coerce_label_list(row.get("genres")),
+        subgenres=_coerce_label_list(row.get("subgenres")),
+        moods=_coerce_label_list(row.get("moods")),
+        activities=_coerce_label_list(row.get("activity")),
+    )
 
 
 def _safe_normalize(vec: np.ndarray) -> np.ndarray:
@@ -113,6 +247,11 @@ class PlaylistProfile:
     # time to differentiate "this playlist is genuinely a Blues playlist"
     # from "this rock playlist happens to have 'Blues Rock' as a subgenre".
     primary_tags: set[str] = field(default_factory=set)
+    # Per-dimension min/max across accepted tracks' audio vectors. Used
+    # by the audio_range_ratio feature to check whether a candidate track
+    # falls inside the playlist's observed audio envelope.
+    audio_min: np.ndarray | None = None
+    audio_max: np.ndarray | None = None
     # Track-popularity statistics across this playlist's accepted tracks.
     # `None` means we have no popularity data (no accepted tracks with
     # popularity recorded). Used by the popularity-fit features.
@@ -166,6 +305,8 @@ class ProfileBundle:
                     "playlist_semantic_centroid": prof.semantic_centroid,
                     "playlist_audio_centroid": prof.audio_centroid,
                     "playlist_audio_std": prof.audio_std,
+                    "playlist_audio_min": prof.audio_min,
+                    "playlist_audio_max": prof.audio_max,
                     "playlist_tags": prof.tags,
                     "playlist_popularity_mean": prof.popularity_mean,
                     "playlist_popularity_std": prof.popularity_std,
@@ -297,9 +438,13 @@ def build_profiles(
             with np.errstate(invalid="ignore"):
                 audio_centroid = np.nanmean(audio_arr, axis=0)
                 audio_std = np.nanstd(audio_arr, axis=0)
+                audio_min = np.nanmin(audio_arr, axis=0)
+                audio_max = np.nanmax(audio_arr, axis=0)
         else:
             audio_centroid = None
             audio_std = None
+            audio_min = None
+            audio_max = None
 
         accepted_pops = [
             popularity_lookup[t]
@@ -375,6 +520,8 @@ def build_profiles(
             acceptance_rate=rate,
             audio_centroid=audio_centroid,
             audio_std=audio_std,
+            audio_min=audio_min,
+            audio_max=audio_max,
             tags=tags,
             primary_tags=primary_xano_tags,
             popularity_mean=popularity_mean,

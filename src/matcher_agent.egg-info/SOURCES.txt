@@ -16,6 +16,7 @@ src/matcher_agent/artifacts/io.py
 src/matcher_agent/audio/__init__.py
 src/matcher_agent/audio/analyzer.py
 src/matcher_agent/audio/downloader.py
+src/matcher_agent/audio/whisper_language.py
 src/matcher_agent/cli/__init__.py
 src/matcher_agent/cli/build_embeddings.py
 src/matcher_agent/cli/build_features.py
@@ -51,6 +52,8 @@ src/matcher_agent/training/dataset.py
 src/matcher_agent/training/metrics.py
 src/matcher_agent/training/train_ranker.py
 tests/test_attribute_normalizer.py
+tests/test_audio_features.py
+tests/test_evaluation_framework.py
 tests/test_feature_builder.py
 tests/test_genre_normalizer.py
 tests/test_genre_tagger.py
@@ -61,5 +64,7 @@ tests/test_parquet_store.py
 tests/test_pipeline_build_features.py
 tests/test_playlist_profiles.py
 tests/test_plot_results.py
+tests/test_text_construction.py
+tests/test_whisper_language.py
 tests/test_xano_client.py
 tests/test_xano_playlists_client.py

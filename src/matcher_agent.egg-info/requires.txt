@@ -1,4 +1,5 @@
 httpx>=0.27.0
+openai-whisper>=20231117
 essentia>=2.1b6.dev1110
 matplotlib>=3.8.0
 numpy>=1.26.0

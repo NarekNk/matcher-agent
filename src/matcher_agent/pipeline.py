@@ -11,6 +11,7 @@ from matcher_agent.audio.analyzer import analyze_audio
 from matcher_agent.audio.downloader import download_preview
 from matcher_agent.clients.preview_resolver_client import enrich_tracks_preview_urls
 from matcher_agent.clients.spotify_client import fetch_playlist_tracks, get_spotify_client, parse_playlist_id
+from matcher_agent.features.playlist_profiles import ensure_audio_columns
 
 
 def _resolve_analysis_workers(analysis_workers: int | None) -> int:
@@ -126,6 +127,7 @@ async def build_track_feature_export(
     cached_by_track_id: dict[str, dict] = {}
     if output_csv.exists():
         cached_df = pd.read_csv(output_csv)
+        cached_df = ensure_audio_columns(cached_df)
         if "track_id" in cached_df.columns:
             for _, row in cached_df.drop_duplicates(subset=["track_id"], keep="last").iterrows():
                 cached_by_track_id[str(row["track_id"])] = row.to_dict()
@@ -133,16 +135,27 @@ async def build_track_feature_export(
 
     sp = get_spotify_client(spotify_client_id, spotify_client_secret)
     rows: list[dict] = []
+    n_skipped_playlists = 0
     for idx, source in enumerate(playlist_sources, 1):
         playlist_id = str(source["playlist_id"])
         playlist_name = source["playlist_name"]
-        spotify_playlist_id = parse_playlist_id(source["spotify_playlist_id"])
-        tracks = fetch_playlist_tracks(sp, spotify_playlist_id, max_tracks=max_tracks_per_playlist)
+        try:
+            spotify_playlist_id = parse_playlist_id(source["spotify_playlist_id"])
+            tracks = fetch_playlist_tracks(sp, spotify_playlist_id, max_tracks=max_tracks_per_playlist)
+        except Exception as exc:
+            n_skipped_playlists += 1
+            print(
+                f"[Features] Playlist {idx}/{len(playlist_sources)} '{playlist_name}' "
+                f"SKIPPED (fetch failed: {exc})"
+            )
+            continue
         print(f"[Features] Playlist {idx}/{len(playlist_sources)} '{playlist_name}' -> {len(tracks)} tracks")
         for track in tracks:
             track["playlist_id"] = playlist_id
             track["playlist_name"] = playlist_name
             rows.append(track)
+    if n_skipped_playlists:
+        print(f"[Features] Skipped {n_skipped_playlists} playlists due to fetch errors.")
     print(f"[Features] Raw fetched rows: {len(rows)}")
 
     unique_tracks: list[dict] = []

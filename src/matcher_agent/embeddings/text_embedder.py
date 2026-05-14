@@ -12,9 +12,22 @@ try:
 except Exception:  # pragma: no cover - optional dependency in tests
     SentenceTransformer = None  # type: ignore[assignment]
 
+# Bump this version whenever the text-construction logic changes (e.g. new
+# fields appended to track/playlist text). The version is mixed into the
+# cache hash so old entries from a previous text format are never served.
+_TEXT_FORMAT_VERSION = "v2"
+
+_KNOWN_DIMS: dict[str, int] = {
+    "all-MiniLM-L6-v2": 384,
+    "all-mpnet-base-v2": 768,
+    "BAAI/bge-small-en-v1.5": 384,
+    "BAAI/bge-base-en-v1.5": 768,
+}
+
 
 def _stable_text_hash(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+    keyed = f"{_TEXT_FORMAT_VERSION}:{text}"
+    return hashlib.sha1(keyed.encode("utf-8", errors="ignore")).hexdigest()
 
 
 def _normalize_text(text: str | None) -> str:
@@ -26,9 +39,10 @@ def _normalize_text(text: str | None) -> str:
 class TextEmbedder:
     """Sentence-transformer text embedder with parquet-backed caching.
 
-    The cache is keyed by the SHA1 of the normalized text so identical strings
-    are never re-embedded. Cache rows live in a single parquet file; embeddings
-    are stored as a numpy float32 list per row.
+    The cache is keyed by ``_TEXT_FORMAT_VERSION`` + SHA1 of the normalized
+    text, so identical strings are never re-embedded and text-format changes
+    automatically invalidate stale entries. The cache parquet filename
+    includes the model name so different models never share a file.
     """
 
     def __init__(
@@ -47,11 +61,23 @@ class TextEmbedder:
         self._cache_df: pd.DataFrame | None = None
 
     @property
+    def _resolved_cache_path(self) -> Path:
+        """Derive the actual cache file path from the base path + model name.
+
+        ``text_embeddings.parquet`` with model ``all-MiniLM-L6-v2`` →
+        ``text_embeddings.all-MiniLM-L6-v2.parquet``. Slashes in model
+        names (e.g. ``BAAI/bge-small-en-v1.5``) are replaced with ``--``.
+        """
+        safe_name = self.model_name.replace("/", "--").replace("\\", "--")
+        stem = self.cache_path.stem
+        suffix = self.cache_path.suffix or ".parquet"
+        return self.cache_path.with_name(f"{stem}.{safe_name}{suffix}")
+
+    @property
     def dim(self) -> int:
-        # all-MiniLM-L6-v2 yields 384-d embeddings; resolved lazily once model loads
         if self._model is not None:
             return int(self._model.get_sentence_embedding_dimension())
-        return 384
+        return _KNOWN_DIMS.get(self.model_name, 384)
 
     def _ensure_model(self) -> SentenceTransformer:
         if self._model is None:
@@ -66,8 +92,9 @@ class TextEmbedder:
     def _load_cache(self) -> pd.DataFrame:
         if self._cache_df is not None:
             return self._cache_df
-        if self.cache_path.exists():
-            df = pd.read_parquet(self.cache_path)
+        path = self._resolved_cache_path
+        if path.exists():
+            df = pd.read_parquet(path)
             if "embedding" in df.columns:
                 df["embedding"] = df["embedding"].map(
                     lambda v: np.asarray(v, dtype=np.float32)
@@ -79,15 +106,16 @@ class TextEmbedder:
 
     def _persist_cache(self) -> None:
         assert self._cache_df is not None
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        path = self._resolved_cache_path
+        path.parent.mkdir(parents=True, exist_ok=True)
         out = self._cache_df.copy()
         if "embedding" in out.columns:
             out["embedding"] = out["embedding"].map(
                 lambda v: np.asarray(v, dtype=np.float32).tolist()
             )
-        tmp = self.cache_path.with_suffix(".parquet.tmp")
+        tmp = path.with_suffix(".parquet.tmp")
         out.to_parquet(tmp, index=False)
-        tmp.replace(self.cache_path)
+        tmp.replace(path)
 
     def encode(self, texts: Iterable[str]) -> np.ndarray:
         """Return an (N, dim) array of embeddings for the given texts.

@@ -13,6 +13,17 @@ load_dotenv()
 class Settings:
     spotify_client_id: str | None = os.getenv("SPOTIFY_CLIENT_ID")
     spotify_client_secret: str | None = os.getenv("SPOTIFY_CLIENT_SECRET")
+    # Local Whisper (``openai-whisper``) on preview audio when no
+    # ``--track-language`` is supplied (see ``cli/recommend``). No API key.
+    whisper_language_detection: bool = os.getenv("WHISPER_LANGUAGE_DETECTION", "1") not in {
+        "0",
+        "false",
+        "False",
+    }
+    # Model size: tiny | base | small | medium | large (default tiny for latency).
+    whisper_model: str = os.getenv("WHISPER_MODEL", "tiny")
+    # Force ``cuda`` or ``cpu`` for Whisper; empty = pick cuda if available else cpu.
+    whisper_device: str | None = os.getenv("WHISPER_DEVICE") or None
     preview_resolver_url: str | None = os.getenv("PREVIEW_RESOLVER_URL")
     xano_playlists_url: str | None = os.getenv("XANO_PLAYLISTS_URL")
     xano_historical_matches_url: str | None = os.getenv("XANO_HISTORICAL_MATCHES_URL")
@@ -34,9 +45,23 @@ class Settings:
     # are already genre-controlled by curators.
     negative_sample_ratio: float = float(os.getenv("NEGATIVE_SAMPLE_RATIO", "5.0"))
     # Fraction of the negative budget that must come from genre-conflicting
-    # playlists (zero canonical-tag overlap with the track). The remainder is
-    # uniform-random catalog negatives. 0 disables hard-negative mining.
-    negative_conflict_fraction: float = float(os.getenv("NEGATIVE_CONFLICT_FRACTION", "0.5"))
+    # playlists (zero canonical-tag overlap with the track). Default 0.33
+    # allocates one third to conflict, one third to near-miss, and the
+    # remainder to random negatives. Set to 1.0 for 100% conflict.
+    negative_conflict_fraction: float = float(os.getenv("NEGATIVE_CONFLICT_FRACTION", "0.33"))
+    # Fraction of the negative budget allocated to near-miss negatives —
+    # playlists that are semantically similar to the accepted playlist but
+    # were not the actual match. These are the hardest negatives and teach
+    # the model to discriminate between similar playlists. Set to 0 to
+    # disable near-miss sampling.
+    negative_near_miss_fraction: float = float(
+        os.getenv("NEGATIVE_NEAR_MISS_FRACTION", "0.33")
+    )
+    # Whether to stratify random negatives by playlist tier so the model
+    # sees negatives from all popularity bands, not just the most common.
+    negative_popularity_stratified: bool = os.getenv(
+        "NEGATIVE_POPULARITY_STRATIFIED", "1"
+    ) not in {"0", "false", "False"}
     # Multiplicative penalty applied at inference time to a playlist's
     # acceptance probability for each soft attribute (mood, language,
     # activity, country, tempo) where the user-supplied track value and the
