@@ -40,6 +40,19 @@ def test_normalize_xano_labels_punk_is_distinct_from_rock() -> None:
     assert "rock" not in tags
 
 
+def test_normalize_xano_pop_rock_maps_to_compound_not_standalone_rock() -> None:
+    tags = normalize_xano_labels(["Pop"], ["Pop Rock", "Teen Pop"])
+    assert "pop_rock" in tags
+    assert "pop" in tags
+    assert "rock" not in tags
+
+
+def test_normalize_xano_dance_pop_is_pop_not_workout_party() -> None:
+    tags = normalize_xano_labels(["Pop"], ["Dance Pop"])
+    assert "pop" in tags
+    assert "workout_party" not in tags
+
+
 def test_normalize_external_labels_handles_spotify_strings() -> None:
     # Spotify artist genre strings may match either an explicit subgenre
     # entry or fall back to the regex tagger.

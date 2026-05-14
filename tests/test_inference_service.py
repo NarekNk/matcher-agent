@@ -406,6 +406,57 @@ def test_explicit_genre_filter_softly_penalizes_untagged_playlists(tmp_path: Pat
     assert by_id["p_untagged"] > by_id["p_pop"]
 
 
+def test_explicit_genre_filter_penalizes_mixed_pop_hiphop_primary(tmp_path: Path) -> None:
+    """Trap playlists that also list Pop as a primary Xano genre must not get
+    the same explicit-genre tier as a pop-only playlist for a pure pop query."""
+    pipe = _make_dummy_pipeline(PAIRWISE_FEATURE_COLS)
+    save_bundle({"model": pipe, "feature_columns": PAIRWISE_FEATURE_COLS}, tmp_path)
+    historical = pd.DataFrame(columns=["track_id", "playlist_id", "label", "track_name", "artist"])
+    playlists = pd.DataFrame(
+        [
+            {
+                "playlist_id": "p_pure_pop",
+                "playlist_name": "Teen Pop Radio",
+                "description": "chart pop",
+                "genres": ["Pop"],
+            },
+            {
+                "playlist_id": "p_trap_and_pop_primary",
+                "playlist_name": "Trap Workout",
+                "description": "trap drill",
+                "genres": ["Hip-Hop", "Pop"],
+            },
+        ]
+    )
+    tracks = pd.DataFrame(columns=["track_id", "track_name", "artist", "bpm"])
+
+    service = MatcherService(
+        artifact_dir=str(tmp_path),
+        historical_df=historical,
+        playlists_df=playlists,
+        tracks_df=tracks,
+        text_embedder=_StubEmbedder(),
+        hard_genre_filter=True,
+        explicit_genre_no_match_penalty=0.01,
+        explicit_genre_untagged_penalty=0.3,
+        explicit_genre_subgenre_only_penalty=0.4,
+        explicit_genre_broadtag_threshold=8,
+    )
+    recs = service.recommend_playlists(
+        TrackInput(
+            track_id="t_pop",
+            track_name="Summer Hit",
+            artist="Star",
+            genres=["Pop"],
+            subgenres=["Teen Pop", "Dance Pop", "Pop Rock"],
+        ),
+        n=2,
+    )
+    by_id = {r.playlist_id: r.acceptance_probability for r in recs}
+    assert recs[0].playlist_id == "p_pure_pop"
+    assert by_id["p_pure_pop"] > by_id["p_trap_and_pop_primary"]
+
+
 def test_explicit_genre_filter_subgenre_only_match_is_moderately_penalized(tmp_path: Path) -> None:
     """Fix F: a Rock playlist whose ONLY blues signal is the 'Blues Rock'
     subgenre must rank below a real Blues primary playlist. The previous

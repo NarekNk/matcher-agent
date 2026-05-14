@@ -73,9 +73,22 @@ _XANO_SUBGENRE_TO_TAGS: dict[str, set[str]] = {
     "teen pop": {"pop"},
     "synthpop": {"pop", "edm"},
     "synth pop": {"pop", "edm"},
-    "dance pop": {"pop", "workout_party"},
+    # Dance pop is chart-oriented pop, not gym/party metadata; tagging it as
+    # ``workout_party`` caused false overlaps with trap/club playlist titles.
+    "dance pop": {"pop"},
     "indie pop": {"pop", "alt_indie"},
-    "pop rock": {"pop", "rock"},
+    # Compounds: single canonical tags so "pop rock" does not add standalone
+    # ``rock`` and falsely align with hard-rock-only playlists.
+    "pop rock": {"pop_rock"},
+    "pop-rock": {"pop_rock"},
+    "indie rock": {"indie_rock"},
+    "indie-rock": {"indie_rock"},
+    "folk rock": {"folk_rock"},
+    "folk-rock": {"folk_rock"},
+    "blues rock": {"blues_rock"},
+    "blues-rock": {"blues_rock"},
+    "punk rock": {"punk_rock"},
+    "punk-rock": {"punk_rock"},
     "k-pop": {"pop", "kpop_jpop"},
     "kpop": {"pop", "kpop_jpop"},
     "j-pop": {"pop", "kpop_jpop"},
@@ -112,17 +125,13 @@ _XANO_SUBGENRE_TO_TAGS: dict[str, set[str]] = {
     "alt r&b": {"rnb", "alt_indie"},
     "alt-r&b": {"rnb", "alt_indie"},
     "funk r&b": {"rnb", "funk"},
-    # Rock
+    # Rock (compounds like punk rock / indie rock live in the Pop block above)
     "classic rock": {"rock"},
     "hard rock": {"rock"},
-    "punk rock": {"rock", "punk"},
     "garage rock": {"rock"},
     "progressive rock": {"rock"},
-    "indie rock": {"rock", "alt_indie"},
     "alternative rock": {"rock", "alt_indie"},
     "psychedelic rock": {"rock"},
-    "blues rock": {"rock", "blues"},
-    "folk rock": {"rock", "folk_acoustic"},
     "acoustic rock": {"rock", "folk_acoustic"},
     "grunge": {"rock", "alt_indie"},
     # Electronic

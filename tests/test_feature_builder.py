@@ -101,6 +101,68 @@ def test_pair_features_capture_genre_alignment() -> None:
     assert rap_to_hh["genre_overlap_count"] >= 1.0
 
 
+def test_genre_precision_primary_rewards_narrow_xano_primary() -> None:
+    """Same track tags vs one primary genre → precision 1.0; vs three primaries
+    with one hit → precision 1/3."""
+    playlists = pd.DataFrame(
+        [
+            {
+                "playlist_id": "narrow",
+                "playlist_name": "Pop Only",
+                "description": "",
+                "genres": ["pop"],
+            },
+            {
+                "playlist_id": "broad",
+                "playlist_name": "Mixed Bag",
+                "description": "",
+                "genres": ["pop", "rock", "electronic"],
+            },
+        ]
+    )
+    matches = pd.DataFrame(
+        [
+            {"playlist_id": "narrow", "track_id": "t1", "label": 1},
+            {"playlist_id": "broad", "track_id": "t1", "label": 1},
+        ]
+    )
+    tracks = pd.DataFrame(
+        [{"track_id": "t1", "artist": "A", "track_name": "X", "popularity": 50}]
+    )
+    emb = _emb(1.0, 0.0, 0.0)
+    track_emb = {"t1": emb}
+    playlist_emb = {"narrow": emb, "broad": emb}
+    bundle = build_profiles(
+        playlists,
+        matches,
+        tracks,
+        track_text_emb_by_id=track_emb,
+        playlist_text_emb_by_id=playlist_emb,
+    )
+    audio_lookup = build_track_audio_lookup(tracks, bundle.audio_feature_cols)
+    meta_lookup = build_track_meta_lookup(tracks)
+    meta_lookup["t1"]["_cached_tags"] = {"pop"}
+
+    pairs = pd.DataFrame(
+        [
+            {"track_id": "t1", "playlist_id": "narrow", "label": 1},
+            {"track_id": "t1", "playlist_id": "broad", "label": 1},
+        ]
+    )
+    feats = build_pair_features(
+        pairs,
+        profile_bundle=bundle,
+        track_text_emb_by_id=track_emb,
+        track_audio_by_id=audio_lookup,
+        track_meta_by_id=meta_lookup,
+    )
+    narrow = feats[feats.playlist_id == "narrow"].iloc[0]
+    broad = feats[feats.playlist_id == "broad"].iloc[0]
+    assert narrow["genre_precision_primary"] == 1.0
+    assert abs(broad["genre_precision_primary"] - (1.0 / 3.0)) < 1e-9
+    assert narrow["genre_precision_primary"] > broad["genre_precision_primary"]
+
+
 def test_pair_features_compute_popularity_fit() -> None:
     bundle, tracks, track_emb = _build_minimal_bundle()
     audio_lookup = build_track_audio_lookup(tracks, bundle.audio_feature_cols)
@@ -173,6 +235,8 @@ def test_select_model_features_returns_pairwise_columns_only() -> None:
         assert must_have in cols
     # Ensure the new v2 features are part of the model contract.
     for must_have in (
+        "genre_precision_primary",
+        "genre_precision_all",
         "genre_semantic_interaction",
         "audio_genre_interaction",
         "semantic_l2_distance",
@@ -432,6 +496,8 @@ def test_new_features_handle_missing_profile() -> None:
     assert row["playlist_n_soft_attrs"] == 0.0
     assert row["playlist_has_language"] == 0.0
     assert row["playlist_has_mood"] == 0.0
+    assert row["genre_precision_primary"] == 0.0
+    assert row["genre_precision_all"] == 0.0
     assert row["mood_match_flag"] == 0.0
     assert row["language_match_flag"] == 0.0
     assert row["activity_match_flag"] == 0.0

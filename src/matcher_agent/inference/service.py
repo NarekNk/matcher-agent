@@ -300,6 +300,7 @@ class MatcherService:
                 f"untagged={self.explicit_genre_untagged_penalty:.2f} "
                 f"broadtag_threshold={self.explicit_genre_broadtag_threshold}): "
                 f"primary_overlap={counts['primary_overlap']} "
+                f"mixed_primary={counts['mixed_primary_penalized']} "
                 f"subgenre_only={counts['subgenre_only']} "
                 f"no_overlap={counts['no_overlap']} "
                 f"untagged_count={counts['untagged']} "
@@ -382,7 +383,9 @@ class MatcherService:
         For each candidate playlist:
           1. Tier multiplier:
              * user tags overlap the playlist's *primary* Xano genres
-               -> 1.0 (genuine genre match)
+               -> 1.0 (genuine genre match), **unless** other primaries remain
+               that ``has_conflict`` with the user's tags (e.g. Hip-Hop + Pop
+               on a trap playlist vs a pop-only user) -> ``subgenre_only_penalty``
              * user tags overlap any playlist tag (subgenre or text-derived)
                but no primary overlap -> `subgenre_only_penalty` (e.g. 0.4)
              * playlist has no tags at all -> `untagged_penalty` (e.g. 0.3)
@@ -414,6 +417,7 @@ class MatcherService:
             "no_overlap": 0,
             "untagged": 0,
             "broadtag_penalized": 0,
+            "mixed_primary_penalized": 0,
         }
         if not authoritative_track_tags:
             return pd.Series(multipliers, index=feats.index), counts
@@ -430,6 +434,13 @@ class MatcherService:
             if primary and (authoritative_track_tags & primary):
                 tier_mult = 1.0
                 counts["primary_overlap"] += 1
+                # Curators often tick both Hip-Hop and Pop on trap playlists.
+                # Primary overlap on ``pop`` alone must not grant a full pass
+                # when other primaries conflict with the user's explicit tags.
+                primary_rest = primary - authoritative_track_tags
+                if primary_rest and has_conflict(authoritative_track_tags, primary_rest):
+                    tier_mult = self.explicit_genre_subgenre_only_penalty
+                    counts["mixed_primary_penalized"] += 1
             elif authoritative_track_tags & prof.tags:
                 tier_mult = self.explicit_genre_subgenre_only_penalty
                 counts["subgenre_only"] += 1

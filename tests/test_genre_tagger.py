@@ -27,8 +27,17 @@ def test_tag_text_recognizes_edm_keywords() -> None:
 def test_tag_text_can_return_multiple_genres() -> None:
     tags = tag_text("Indie Rock & Alt Folk Acoustic")
     assert "alt_indie" in tags
-    assert "rock" in tags
+    assert "indie_rock" in tags
+    # Standalone ``rock`` is dropped when ``indie_rock`` matched (avoids
+    # substring "rock" inside the compound).
+    assert "rock" not in tags
     assert "folk_acoustic" in tags
+
+
+def test_tag_text_pop_rock_is_compound_not_rock() -> None:
+    tags = tag_text("Best Pop Rock Hits 2026")
+    assert "pop_rock" in tags
+    assert "rock" not in tags
 
 
 def test_jaccard_basic() -> None:
@@ -41,6 +50,17 @@ def test_has_conflict_flags_obvious_mismatches() -> None:
     track_tags = {"hip_hop"}
     playlist_tags = {"country"}
     assert has_conflict(track_tags, playlist_tags) is True
+
+
+def test_has_conflict_pop_vs_hip_hop_when_disjoint() -> None:
+    assert has_conflict({"pop"}, {"hip_hop"}) is True
+    assert has_conflict({"pop", "pop_rock"}, {"hip_hop"}) is True
+
+
+def test_tag_text_dance_pop_does_not_tag_workout_party() -> None:
+    tags = tag_text("dance pop hits")
+    assert "pop" in tags
+    assert "workout_party" not in tags
 
 
 def test_has_conflict_no_flag_when_overlap() -> None:

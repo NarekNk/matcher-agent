@@ -5,7 +5,8 @@ from collections.abc import Iterable
 
 # Mapping of canonical genre tag -> ordered list of recognition patterns.
 # Patterns are matched against lowercased text using word-boundary regex.
-# Order matters: more specific patterns first (e.g. "hip hop" before "pop").
+# Order matters: **compound phrases before generic ``\\brock\\b`` / ``\\bpop\\b``**
+# so "pop rock" becomes ``pop_rock``, not {pop, rock} from substring matches.
 #
 # These tags are the SHARED VOCABULARY used across:
 #   - rule-based tagger (this file, regex over titles/descriptions)
@@ -15,6 +16,12 @@ from collections.abc import Iterable
 # When you add a tag here you should also add it to genre_normalizer's
 # external maps and decide whether it deserves a conflict-group entry below.
 _GENRE_PATTERNS: list[tuple[str, list[str]]] = [
+    # --- Compounds (must appear before generic rock/pop/punk/folk/blues) ---
+    ("pop_rock", [r"\bpop\s*rock\b", r"\bpop-rock\b"]),
+    ("indie_rock", [r"\bindie\s*rock\b", r"\bindie-rock\b"]),
+    ("folk_rock", [r"\bfolk\s*rock\b", r"\bfolk-rock\b"]),
+    ("blues_rock", [r"\bblues\s*rock\b", r"\bblues-rock\b"]),
+    ("punk_rock", [r"\bpunk\s*rock\b", r"\bpunk-rock\b"]),
     ("hip_hop", [
         r"hip\s*-?\s*hop", r"hiphop", r"\brap\b", r"\btrap\b", r"\bdrill\b",
         r"\burban\b", r"\bboom\s*bap\b", r"\bgangsta\b", r"\bcloud\s*rap\b",
@@ -60,7 +67,7 @@ _GENRE_PATTERNS: list[tuple[str, list[str]]] = [
     ]),
     ("workout_party", [
         r"\bworkout\b", r"\bgym\b", r"\bfitness\b", r"\brunning\b", r"\bcardio\b",
-        r"\bparty\b", r"\bclub\b", r"\bdance\s*pop\b",
+        r"\bparty\b", r"\bclub\b",
     ]),
     ("kpop_jpop", [r"\bk[\s-]*pop\b", r"\bj[\s-]*pop\b", r"\bk[\s-]*drama\b", r"\bcity\s*pop\b"]),
     ("world", [r"\bworld\s*music\b", r"\bbhangra\b", r"\bcelt", r"\bafrican\s*music\b", r"\bbalkan\b"]),
@@ -72,7 +79,7 @@ _GENRE_PATTERNS: list[tuple[str, list[str]]] = [
 # has tags from the OTHER side AND they share no tags overall. The set is
 # intentionally conservative — we'd rather miss a soft conflict than wrongly
 # penalize a borderline match.
-_CONFLICT_GROUPS: list[set[str]] = [
+_CONFLICT_GROUPS_RAW: list[set[str]] = [
     {"hip_hop", "country"},
     {"hip_hop", "classical"},
     {"hip_hop", "folk_acoustic"},
@@ -88,6 +95,10 @@ _CONFLICT_GROUPS: list[set[str]] = [
     {"gospel_christian", "edm"},
     {"gospel_christian", "metal"},
     {"metal", "pop"},
+    # Pop vs hip-hop are often both listed on catch-all playlists; disjoint
+    # user intent (pop-only) vs hip-hop-primary must still surface in
+    # ``has_conflict`` for the hard filter and mixed-primary explicit penalty.
+    {"hip_hop", "pop"},
     {"metal", "kpop_jpop"},
     {"metal", "chill_lofi"},
     {"metal", "ambient"},
@@ -105,11 +116,45 @@ _CONFLICT_GROUPS: list[set[str]] = [
 ]
 
 
+def _expand_conflict_groups(groups: list[set[str]]) -> list[set[str]]:
+    """Treat compound *rock tags like ``rock`` for conflict detection.
+
+    Also treat ``pop_rock`` like ``pop`` in any group that already lists
+    ``pop`` (e.g. metal vs pop).
+    """
+    rock_family = frozenset(
+        {"rock", "pop_rock", "indie_rock", "folk_rock", "blues_rock", "punk_rock"}
+    )
+    out: list[set[str]] = []
+    for g in groups:
+        ng = set(g)
+        if "rock" in ng:
+            ng |= set(rock_family)
+        if "pop" in ng:
+            ng.add("pop_rock")
+        out.append(ng)
+    return out
+
+
+_CONFLICT_GROUPS: list[set[str]] = _expand_conflict_groups(_CONFLICT_GROUPS_RAW)
+
+
 def _compile_patterns() -> list[tuple[str, list[re.Pattern[str]]]]:
     return [(g, [re.compile(p) for p in pats]) for g, pats in _GENRE_PATTERNS]
 
 
 _COMPILED = _compile_patterns()
+
+# When these compound tags match, drop standalone ``rock`` that came only from
+# the ``\\brock\\b`` pattern matching inside e.g. "pop rock".
+_COMPOUND_TAGS_THAT_DEMOTE_STANDALONE_ROCK: frozenset[str] = frozenset(
+    {"pop_rock", "indie_rock", "folk_rock", "blues_rock", "punk_rock"}
+)
+
+
+def _demote_spurious_rock_from_compounds(tags: set[str]) -> None:
+    if tags & _COMPOUND_TAGS_THAT_DEMOTE_STANDALONE_ROCK:
+        tags.discard("rock")
 
 
 def normalize_for_tagging(text: str | None) -> str:
@@ -127,6 +172,7 @@ def tag_text(text: str | None) -> set[str]:
     for genre, patterns in _COMPILED:
         if any(p.search(norm) for p in patterns):
             tags.add(genre)
+    _demote_spurious_rock_from_compounds(tags)
     return tags
 
 

@@ -28,10 +28,11 @@ from matcher_agent.features.playlist_profiles import (
 # excluded from the model. They were Top-4 in importance only because they
 # acted as a proxy for "is this row Xano-tagged with a rich genre profile",
 # which is a data-completeness signal, not a genre-fit signal. The real
-# genre fit lives in `genre_jaccard`, `genre_overlap_count`, and
-# `genre_conflict_flag` — which only become discriminative once we add
-# genre-conflict hard negatives during training. We still COMPUTE the count
-# columns in `build_pair_features` so older saved models that include them
+# genre fit lives in `genre_jaccard`, `genre_overlap_count`,
+# `genre_conflict_flag`, and playlist-side `genre_precision_*` — which only
+# become discriminative once we add genre-conflict hard negatives during
+# training. We still COMPUTE the count columns in `build_pair_features` so older
+# saved models that include them
 # in their `feature_columns` still load and infer correctly.
 PAIRWISE_FEATURE_COLS: list[str] = [
     "semantic_similarity",
@@ -42,6 +43,10 @@ PAIRWISE_FEATURE_COLS: list[str] = [
     "audio_zscore_max",
     "genre_jaccard",
     "genre_overlap_count",
+    # Playlist-side precision: overlap / |playlist primary genres| (fallback to
+    # full tag set when primary is empty). Rewards 1/1 over 1/15 primary hits.
+    "genre_precision_primary",
+    "genre_precision_all",
     "genre_conflict_flag",
     "track_audio_available",
     # Track popularity vs playlist-accepted-popularity. These let the model
@@ -348,6 +353,24 @@ def build_pair_features(
             tags_overlap = jaccard(track_tags, prof.tags)
             overlap_count = float(len(track_tags & prof.tags))
             conflict = 1.0 if has_conflict(track_tags, prof.tags) else 0.0
+            primary = prof.primary_tags
+            all_pl_tags = prof.tags
+            if primary:
+                genre_precision_primary = len(track_tags & primary) / max(
+                    len(primary), 1
+                )
+            elif all_pl_tags:
+                genre_precision_primary = len(track_tags & all_pl_tags) / max(
+                    len(all_pl_tags), 1
+                )
+            else:
+                genre_precision_primary = 0.0
+            if all_pl_tags:
+                genre_precision_all = len(track_tags & all_pl_tags) / max(
+                    len(all_pl_tags), 1
+                )
+            else:
+                genre_precision_all = 0.0
             tag_count_pl = float(len(prof.tags))
             acceptance_rate = float(prof.acceptance_rate)
             accepted_count = float(prof.accepted_count)
@@ -365,6 +388,8 @@ def build_pair_features(
             tags_overlap = 0.0
             overlap_count = 0.0
             conflict = 0.0
+            genre_precision_primary = 0.0
+            genre_precision_all = 0.0
             tag_count_pl = 0.0
             acceptance_rate = 0.0
             accepted_count = 0.0
@@ -421,6 +446,8 @@ def build_pair_features(
                 "audio_zscore_max": audio_z_max,
                 "genre_jaccard": tags_overlap,
                 "genre_overlap_count": overlap_count,
+                "genre_precision_primary": float(genre_precision_primary),
+                "genre_precision_all": float(genre_precision_all),
                 "genre_conflict_flag": conflict,
                 "genre_tag_count_track": float(len(track_tags)),
                 "genre_tag_count_playlist": tag_count_pl,
